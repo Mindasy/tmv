@@ -1,0 +1,18 @@
+[package]
+name = "tmv-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tmv"
+path = "src/main.rs"
+
+[dependencies]
+tmv-core.workspace = true
+tmv-tui.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+libc.workspace = true
+ratatui.workspace = true

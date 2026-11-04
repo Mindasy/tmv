@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tmv-core",
+    "crates/tmv-symbols",
+    "crates/tmv-ptrace",
+    "crates/tmv-tui",
+    "crates/tmv-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+addr2line = "0.27"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+libc = "0.2"
+object = "0.40"
+ratatui = "0.29"
+rustc-demangle = "0.1"
+unicode-width = "0.2"
+tmv-core = { path = "crates/tmv-core" }
+tmv-symbols = { path = "crates/tmv-symbols" }
+tmv-ptrace = { path = "crates/tmv-ptrace" }
+tmv-tui = { path = "crates/tmv-tui" }
