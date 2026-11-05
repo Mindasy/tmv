@@ -11,17 +11,28 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+# openEuler 24.03 自带 rust 1.82，这里声明最低支持版本，
+# 避免误用更新的标准库 API（cargo / clippy / rust-analyzer 都会据此检查）。
+rust-version = "1.82"
 license = "MIT"
 
 [workspace.dependencies]
-addr2line = "0.27"
+# 0.25 依赖的 object 不带 ruzstd 0.9（该版本要求 edition2024，openEuler 的 rust 1.82 无法解析）。
+addr2line = "0.25"
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+# 精确固定 4.5.23：更高版本（4.5.2x+ / 4.6）会依赖 edition2024 的 clap_lex，
+# openEuler 24.03 自带 rust 1.82 无法解析。
+clap = { version = "=4.5.23", features = ["derive"] }
 crossterm = "0.28"
+# gimli / object 固定在 openEuler rust 1.82 可编译的版本：
+# 0.34 / 0.40 使用 edition2024，1.82 无法解析。
+gimli = "0.32"
 libc = "0.2"
-object = "0.40"
+object = { version = "0.37", default-features = false, features = ["read", "std", "elf", "macho"] }
 ratatui = "0.29"
 rustc-demangle = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 unicode-width = "0.2"
 tmv-core = { path = "crates/tmv-core" }
 tmv-symbols = { path = "crates/tmv-symbols" }

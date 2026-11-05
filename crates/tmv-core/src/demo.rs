@@ -238,3 +238,18 @@ pub fn page_scan(start: u64, end: u64, page_size: u64, max_samples: usize) -> Pa
         summary,
     }
 }
+
+/// 合成一段内存内容，用于在没有真实进程时预览内存查看器。
+pub fn memory(base: u64, len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|offset| {
+            let address = base.wrapping_add(offset as u64);
+            // 混入可打印字符，让 ASCII 栏也能看出结构。
+            match address % 7 {
+                0 => b'\n',
+                3 => 0,
+                _ => b'a' + (address % 26) as u8,
+            }
+        })
+        .collect()
+}

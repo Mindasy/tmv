@@ -2,7 +2,9 @@
 //!
 //! - 文件映射：读取 ELF 的 symtab + dynsym，按「映射地址 - 文件偏移」计算加载偏差；
 //! - 源码行：用 addr2line 懒加载 DWARF；
-//! - JIT：读取 perf 约定的 `/tmp/perf-<pid>.map`。
+//! - JIT：读取 perf 约定的 `/tmp/perf-<pid>.map`；
+//! - 调试信息：支持 build-id / `.gnu_debuglink` 指向的独立调试文件；
+//! - CFI：解析 `.eh_frame`，为 DWARF 栈回溯提供每帧规则。
 
 use std::collections::HashMap;
 use std::fs;
@@ -11,6 +13,10 @@ use std::path::{Path, PathBuf};
 use addr2line::Loader;
 use object::{Object, ObjectSymbol};
 use tmv_core::ProcessSnapshot;
+
+pub mod cfi;
+
+pub use cfi::{FrameRules, SavedRule};
 
 /// 一次地址解析的结果。
 #[derive(Debug, Clone, Default)]
@@ -39,8 +45,14 @@ pub struct SymbolEngine {
     modules: Vec<Module>,
     jit: Vec<JitSymbol>,
     jit_module: String,
+    /// [vdso] 这类只在进程内存里存在的模块。
+    mem_modules: Vec<MemModule>,
     /// 按 (路径, 加载偏差) 缓存解析结果；None 表示解析失败。
     cache: HashMap<(PathBuf, u64), Option<ModuleData>>,
+    /// 按 (路径, 加载偏差) 缓存 `.eh_frame`。
+    cfi_cache: HashMap<(PathBuf, u64), Option<cfi::CfiData>>,
+    /// 按 PC 缓存 unwind 规则，避免同一帧重复扫描 `.eh_frame`。
+    rules_cache: HashMap<u64, Option<FrameRules>>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +78,14 @@ pub struct JitSymbol {
     pub name: String,
 }
 
+/// 只在进程内存在的模块（如 `[vdso]`），从 /proc/pid/mem 读出 ELF 后解析。
+struct MemModule {
+    name: String,
+    start: u64,
+    end: u64,
+    data: ModuleData,
+}
+
 struct ModuleData {
     symbols: Vec<SymbolEntry>,
     loader: Option<Loader>,
@@ -86,13 +106,19 @@ impl SymbolEngine {
             modules: Vec::new(),
             jit: Vec::new(),
             jit_module: "[jit]".to_string(),
+            mem_modules: Vec::new(),
             cache: HashMap::new(),
+            cfi_cache: HashMap::new(),
+            rules_cache: HashMap::new(),
         }
     }
 
     /// 从进程快照构建模块索引，只记录元数据，ELF 在首次解析时懒加载。
     pub fn for_process(snapshot: &ProcessSnapshot) -> Self {
-        let mut grouped: HashMap<(String, u64, String), (Vec<(u64, u64)>, u64)> = HashMap::new();
+        // 键：(路径, 加载偏差, build-id)；值：(地址区间列表, 区间并集大小)。
+        type ModuleKey = (String, u64, String);
+        type ModuleRanges = (Vec<(u64, u64)>, u64);
+        let mut grouped: HashMap<ModuleKey, ModuleRanges> = HashMap::new();
         for vma in &snapshot.vmas {
             let path = normalize_path(&vma.pathname);
             if path.is_empty() || path.starts_with('[') {
@@ -124,7 +150,10 @@ impl SymbolEngine {
             modules,
             jit: load_jit_map(snapshot.pid),
             jit_module: "[jit]".to_string(),
+            mem_modules: load_memory_modules(snapshot),
             cache: HashMap::new(),
+            cfi_cache: HashMap::new(),
+            rules_cache: HashMap::new(),
         }
     }
 
@@ -135,8 +164,8 @@ impl SymbolEngine {
             let parts = if vma.perms.exec { 3 } else { 1 };
             let span = vma.end.saturating_sub(vma.start);
             for index in 0..parts {
-                let start = vma.start + span * index as u64 / parts;
-                let end = vma.start + span * (index as u64 + 1) / parts;
+                let start = vma.start + span * index / parts;
+                let end = vma.start + span * (index + 1) / parts;
                 jit.push(JitSymbol {
                     start,
                     end,
@@ -148,7 +177,10 @@ impl SymbolEngine {
             modules: Vec::new(),
             jit,
             jit_module: "[demo]".to_string(),
+            mem_modules: Vec::new(),
             cache: HashMap::new(),
+            cfi_cache: HashMap::new(),
+            rules_cache: HashMap::new(),
         }
     }
 
@@ -159,6 +191,25 @@ impl SymbolEngine {
                 module: self.jit_module.clone(),
                 symbol: Some(symbol.name.clone()),
                 offset: address - symbol.start,
+                file: None,
+                line: None,
+            });
+        }
+
+        if let Some(module) = self
+            .mem_modules
+            .iter()
+            .find(|module| address >= module.start && address < module.end)
+        {
+            let (symbol, offset) = match module.data.find_symbol(address) {
+                Some(entry) => (Some(entry.name.clone()), address - entry.start),
+                None => (None, 0),
+            };
+            return Some(Resolved {
+                address,
+                module: module.name.clone(),
+                symbol,
+                offset,
                 file: None,
                 line: None,
             });
@@ -191,13 +242,65 @@ impl SymbolEngine {
             line,
         })
     }
+
+    /// 查询 `pc` 所在模块的 DWARF unwind 规则；没有可用 CFI 时返回 None。
+    pub fn frame_rules(&mut self, pc: u64) -> Option<FrameRules> {
+        if let Some(cached) = self.rules_cache.get(&pc) {
+            return *cached;
+        }
+        let rules = self.lookup_frame_rules(pc);
+        self.rules_cache.insert(pc, rules);
+        rules
+    }
+
+    fn lookup_frame_rules(&mut self, pc: u64) -> Option<FrameRules> {
+        let module = self
+            .modules
+            .iter()
+            .find(|module| module.contains(pc))?
+            .clone();
+        let key = (module.path.clone(), module.bias);
+        if !self.cfi_cache.contains_key(&key) {
+            let data = load_cfi(&module.path, module.bias);
+            self.cfi_cache.insert(key.clone(), data);
+        }
+        self.cfi_cache.get(&key)?.as_ref()?.rules(pc)
+    }
 }
 
 impl ModuleData {
     fn load(path: &Path, bias: u64) -> Option<Self> {
         let bytes = fs::read(path).ok()?;
         let object = object::File::parse(bytes.as_slice()).ok()?;
+        let mut data = Self::from_object(&object, bias, Some(path));
 
+        // 主文件被 strip 时，尝试用 build-id / .gnu_debuglink 指向的独立调试文件补全。
+        if data.symbols.is_empty() || data.loader.is_none() {
+            if let Some(debug_path) = locate_debug_file(path, &object) {
+                if let Ok(debug_bytes) = fs::read(&debug_path) {
+                    if let Ok(debug_object) = object::File::parse(debug_bytes.as_slice()) {
+                        let debug = Self::from_object(&debug_object, bias, Some(&debug_path));
+                        if data.symbols.is_empty() {
+                            data.symbols = debug.symbols;
+                        }
+                        if data.loader.is_none() {
+                            data.loader = debug.loader;
+                        }
+                    }
+                }
+            }
+        }
+
+        Some(data)
+    }
+
+    /// 直接从内存中的 ELF 构建，用于 `[vdso]` 这类没有文件后端的模块。
+    fn from_bytes(bytes: &[u8], bias: u64) -> Option<Self> {
+        let object = object::File::parse(bytes).ok()?;
+        Some(Self::from_object(&object, bias, None))
+    }
+
+    fn from_object(object: &object::File<'_>, bias: u64, path: Option<&Path>) -> Self {
         // 非 PIE 可执行文件的 st_value 已经是绝对地址，不能再加映射基址。
         let bias = if object.kind() == object::ObjectKind::Executable {
             0
@@ -234,11 +337,11 @@ impl ModuleData {
         symbols.sort_by(|a, b| a.start.cmp(&b.start).then(a.end.cmp(&b.end)));
         symbols.dedup_by(|a, b| a.start == b.start && a.name == b.name);
 
-        Some(Self {
+        Self {
             symbols,
-            loader: Loader::new(path).ok(),
+            loader: path.and_then(|path| Loader::new(path).ok()),
             bias,
-        })
+        }
     }
 
     fn find_symbol(&self, address: u64) -> Option<&SymbolEntry> {
@@ -261,7 +364,104 @@ impl ModuleData {
     }
 }
 
-fn find_jit<'a>(symbols: &'a [JitSymbol], address: u64) -> Option<&'a JitSymbol> {
+/// 加载模块的 `.eh_frame`；主文件没有时改用独立调试文件。
+fn load_cfi(path: &Path, bias: u64) -> Option<cfi::CfiData> {
+    if let Some(data) = cfi::CfiData::load(path, bias) {
+        return Some(data);
+    }
+    let bytes = fs::read(path).ok()?;
+    let object = object::File::parse(bytes.as_slice()).ok()?;
+    let debug_path = locate_debug_file(path, &object)?;
+    cfi::CfiData::load(&debug_path, bias)
+}
+
+/// build-id 对应的独立调试文件路径：`/usr/lib/debug/.build-id/ab/cdef....debug`。
+pub fn build_id_debug_path(build_id: &[u8]) -> Option<PathBuf> {
+    if build_id.len() < 2 {
+        return None;
+    }
+    let hex: String = build_id.iter().map(|byte| format!("{byte:02x}")).collect();
+    let (head, tail) = hex.split_at(2);
+    Some(PathBuf::from(format!(
+        "/usr/lib/debug/.build-id/{head}/{tail}.debug"
+    )))
+}
+
+/// `.gnu_debuglink` 的候选路径：模块同目录、`/usr/lib/debug/<模块目录>`。
+pub fn debuglink_candidates(module: &Path, link: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(parent) = module.parent() {
+        candidates.push(parent.join(link));
+        if let Ok(relative) = module.strip_prefix("/") {
+            let debug = Path::new("/usr/lib/debug").join(relative);
+            if let Some(parent) = debug.parent() {
+                candidates.push(parent.join(link));
+            }
+        }
+    }
+    candidates
+}
+
+/// 找出模块对应的独立调试文件：优先 build-id，其次 `.gnu_debuglink`。
+fn locate_debug_file(module: &Path, object: &object::File<'_>) -> Option<PathBuf> {
+    let candidates = object
+        .build_id()
+        .ok()
+        .flatten()
+        .and_then(build_id_debug_path)
+        .into_iter()
+        .chain(
+            object
+                .gnu_debuglink()
+                .ok()
+                .flatten()
+                .map(|(link, _)| String::from_utf8_lossy(link).into_owned())
+                .map(|link| debuglink_candidates(module, &link))
+                .unwrap_or_default(),
+        );
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+/// 从 /proc/pid/mem 读取一段内存；需要 ptrace 权限，失败时返回错误。
+fn read_process_memory(pid: i32, address: u64, len: usize) -> std::io::Result<Vec<u8>> {
+    use std::os::unix::fs::FileExt;
+
+    let mut buffer = vec![0u8; len];
+    let file = fs::File::open(format!("/proc/{pid}/mem"))?;
+    file.read_exact_at(&mut buffer, address)?;
+    Ok(buffer)
+}
+
+/// 解析 `[vdso]` / `[vsyscall]` 这类只存在于进程内存的模块。
+fn load_memory_modules(snapshot: &ProcessSnapshot) -> Vec<MemModule> {
+    const MAX_SIZE: u64 = 256 * 1024;
+    let mut modules = Vec::new();
+    for vma in &snapshot.vmas {
+        let name = normalize_path(&vma.pathname);
+        if name != "[vdso]" && name != "[vsyscall]" {
+            continue;
+        }
+        let size = vma.len().min(MAX_SIZE) as usize;
+        if size == 0 {
+            continue;
+        }
+        let Ok(bytes) = read_process_memory(snapshot.pid, vma.start, size) else {
+            continue;
+        };
+        let Some(data) = ModuleData::from_bytes(&bytes, vma.start) else {
+            continue;
+        };
+        modules.push(MemModule {
+            name,
+            start: vma.start,
+            end: vma.end,
+            data,
+        });
+    }
+    modules
+}
+
+fn find_jit(symbols: &[JitSymbol], address: u64) -> Option<&JitSymbol> {
     let index = symbols.partition_point(|symbol| symbol.start <= address);
     symbols[..index]
         .iter()
@@ -411,5 +611,49 @@ bad line
         let exe = std::env::current_exe().expect("当前测试可执行文件");
         let data = ModuleData::load(&exe, 0).expect("解析自身符号表");
         assert!(!data.symbols.is_empty(), "符号表为空");
+    }
+
+    #[test]
+    fn build_id_maps_to_debug_path() {
+        let path = build_id_debug_path(&[0xab, 0xcd, 0x01, 0x23]).expect("至少 2 字节");
+        assert_eq!(
+            path,
+            PathBuf::from("/usr/lib/debug/.build-id/ab/cd0123.debug")
+        );
+        assert!(build_id_debug_path(&[0xab]).is_none());
+    }
+
+    #[test]
+    fn debuglink_candidates_cover_module_and_debug_root() {
+        let candidates = debuglink_candidates(Path::new("/usr/lib/libdemo.so.1"), "libdemo.debug");
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/usr/lib/libdemo.debug"),
+                PathBuf::from("/usr/lib/debug/usr/lib/libdemo.debug"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_elf_from_bytes() {
+        let exe = std::env::current_exe().expect("当前测试可执行文件");
+        let bytes = std::fs::read(exe).expect("读取自身");
+        let data = ModuleData::from_bytes(&bytes, 0).expect("从内存字节解析 ELF");
+        assert!(!data.symbols.is_empty());
+        assert!(
+            data.loader.is_none(),
+            "内存 ELF 没有文件路径，不应有 DWARF loader"
+        );
+    }
+
+    #[test]
+    fn vdso_is_skipped_when_memory_is_unreadable() {
+        let snapshot = ProcessSnapshot::from_vmas(
+            2_000_000_000,
+            vec![vma(0x7fff_0000, 0x7fff_2000, 0, "[vdso]")],
+            true,
+        );
+        assert!(load_memory_modules(&snapshot).is_empty());
     }
 }

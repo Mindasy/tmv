@@ -1,0 +1,2 @@
+# openEuler 24.03 自带 rust 1.82，clippy 据此过滤更新版本才有的 API 建议。
+msrv = "1.82"

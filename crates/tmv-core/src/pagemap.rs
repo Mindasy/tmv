@@ -63,6 +63,58 @@ pub struct PageScan {
     pub summary: PageSummary,
 }
 
+/// 同一区间两次页扫描之间的状态变化，单位样本数。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PageDelta {
+    /// 之前非驻留、现在驻留（新触及或因换入回到内存）。
+    pub became_present: u64,
+    /// 之前驻留、现在被换出。
+    pub became_swapped: u64,
+    /// 之前驻留、现在既不在内存也未换出（取消映射或页被回收）。
+    pub became_absent: u64,
+    /// 之前独占、现在被多个映射共享。
+    pub became_shared: u64,
+    /// 之前共享、现在独占。
+    pub became_exclusive: u64,
+}
+
+impl PageDelta {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// 比较两次针对同一区间的扫描；区间或样本数不一致时返回 None。
+///
+/// `states` 按相同步长抽样，因此可以逐下标对应。
+pub fn delta(before: &PageScan, after: &PageScan) -> Option<PageDelta> {
+    if before.start != after.start
+        || before.end != after.end
+        || before.page_size != after.page_size
+        || before.states.len() != after.states.len()
+    {
+        return None;
+    }
+
+    let mut result = PageDelta::default();
+    for (old, new) in before.states.iter().zip(&after.states) {
+        match (old.present, new.present) {
+            (false, true) => result.became_present += 1,
+            (true, false) if new.swapped => result.became_swapped += 1,
+            (true, false) => result.became_absent += 1,
+            (true, true) => {
+                if !old.shared && new.shared {
+                    result.became_shared += 1;
+                } else if old.shared && !new.shared {
+                    result.became_exclusive += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(result)
+}
+
 /// 解析一条 pagemap 记录。
 pub fn decode_entry(raw: u64) -> PageState {
     PageState {
@@ -250,5 +302,64 @@ mod tests {
         assert_eq!(summary.swapped, 1);
         assert_eq!(summary.absent, 1);
         assert!(summary.pfn_available);
+    }
+
+    fn scan_of(states: Vec<PageState>) -> PageScan {
+        PageScan {
+            start: 0x1000,
+            end: 0x1000 + states.len() as u64 * 4096,
+            page_size: 4096,
+            pages: states.len() as u64,
+            sampled: false,
+            summary: summarize(&states),
+            states,
+        }
+    }
+
+    #[test]
+    fn delta_classifies_state_transitions() {
+        let present = PageState {
+            present: true,
+            ..Default::default()
+        };
+        let shared = PageState {
+            present: true,
+            shared: true,
+            ..Default::default()
+        };
+        let swapped = PageState {
+            swapped: true,
+            ..Default::default()
+        };
+        let absent = PageState::default();
+
+        let before = scan_of(vec![present, present, present, shared]);
+        let after = scan_of(vec![present, swapped, absent, present]);
+        let delta = delta(&before, &after).expect("区间一致时应能比较");
+
+        assert_eq!(delta.became_present, 0);
+        assert_eq!(delta.became_swapped, 1);
+        assert_eq!(delta.became_absent, 1);
+        assert_eq!(delta.became_exclusive, 1);
+        assert_eq!(delta.became_shared, 0);
+        assert!(!delta.is_empty());
+    }
+
+    #[test]
+    fn delta_requires_same_range() {
+        let before = scan_of(vec![PageState::default()]);
+        let mut after = scan_of(vec![PageState::default()]);
+        after.end += 4096;
+        assert!(delta(&before, &after).is_none());
+
+        let mut after = scan_of(vec![PageState::default()]);
+        after.states.push(PageState::default());
+        assert!(delta(&before, &after).is_none());
+    }
+
+    #[test]
+    fn unchanged_scan_has_empty_delta() {
+        let scan = scan_of(vec![PageState::default(), PageState::default()]);
+        assert!(delta(&scan, &scan).expect("同一份扫描").is_empty());
     }
 }

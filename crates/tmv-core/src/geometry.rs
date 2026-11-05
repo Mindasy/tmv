@@ -4,7 +4,7 @@
 //! 所有位移、掩码与大页尺寸都必须从这里派生，不能硬编码 4K。
 
 /// 页大小、VA 位宽与由两者推导出的页表几何。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TargetGeometry {
     pub page_size: u64,
     pub va_bits: u32,
@@ -43,11 +43,14 @@ impl TargetGeometry {
         self.page_size << self.table_index_bits()
     }
 
-    /// 剥离 TBI/MTE 顶层 tag，并按 VA 位宽做符号扩展。
+    /// 剥离 TBI/MTE 顶层 tag，并按 VA 位宽截断到用户态地址。
+    ///
+    /// 不能对 `[2^47, 2^48)` 区间的用户地址做符号扩展：48 位 VA 的用户空间
+    /// 一直延伸到 `2^48`，而 `/proc/<pid>/maps` 打印的是零扩展值。
     pub fn canonicalize(&self, addr: u64) -> u64 {
         let untagged = addr & 0x00ff_ffff_ffff_ffff;
-        let shift = 64 - self.va_bits;
-        (((untagged << shift) as i64) >> shift) as u64
+        let mask = (1u64 << self.va_bits) - 1;
+        untagged & mask
     }
 
     pub fn page_of(&self, addr: u64) -> u64 {
@@ -80,16 +83,26 @@ mod tests {
     #[test]
     fn canonicalize_strips_top_byte_tag() {
         let geo = TargetGeometry::new(4096, 48);
-        assert_eq!(geo.canonicalize(0xAB00_7fff_ffff_f000), 0x7fff_ffff_f000);
+        assert_eq!(geo.canonicalize(0xab00_7fff_ffff_f000), 0x7fff_ffff_f000);
     }
 
     #[test]
-    fn canonicalize_sign_extends_kernel_address() {
+    fn canonicalize_keeps_high_user_addresses() {
         let geo = TargetGeometry::new(4096, 48);
+        // 48 位 VA 的用户空间可到 2^48，这一区间不能做符号扩展。
+        assert_eq!(geo.canonicalize(0x0000_ffff_b003_8000), 0xffff_b003_8000);
+        // TBI tag 仍在最高字节上被剥离。
+        assert_eq!(geo.canonicalize(0xff00_ffff_b003_8000), 0xffff_b003_8000);
+    }
+
+    #[test]
+    fn canonicalize_truncates_to_declared_va_bits() {
+        let lva = TargetGeometry::new(4096, 52);
         assert_eq!(
-            geo.canonicalize(0x0000_ffff_8000_0000),
-            0xffff_ffff_8000_0000
+            lva.canonicalize(0x000f_ffff_ffff_f000),
+            0x000f_ffff_ffff_f000
         );
+        assert_eq!(lva.canonicalize(0xab00_000f_ffff_f000), 0x000f_ffff_f000);
     }
 
     #[test]

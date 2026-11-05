@@ -2,7 +2,7 @@
 
 use tmv_core::ProcessSnapshot;
 
-use crate::{StackFrame, ThreadInfo, ThreadStack};
+use crate::{StackFrame, ThreadInfo, ThreadStack, UnwindMethod};
 
 pub const THREAD_NAMES: [&str; 4] = ["main", "worker", "jit", "io"];
 
@@ -39,6 +39,7 @@ pub fn stack(snapshot: &ProcessSnapshot, index: usize) -> ThreadStack {
         name: THREAD_NAMES[index % THREAD_NAMES.len()].to_string(),
         tls: Some(0x7f00_0000_0000 + index as u64 * 0x1000),
         frames,
+        method: UnwindMethod::FramePointer,
     }
 }
 

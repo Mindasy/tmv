@@ -1,12 +1,29 @@
 //! 单个 VMA（虚拟内存区域）及其 smaps 统计。
 
 /// 映射权限，对应 /proc/pid/maps 第二个字段。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// 序列化为 `"r-xp"` 这样的字符串，便于基线文件阅读与手工编辑。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct Perms {
     pub read: bool,
     pub write: bool,
     pub exec: bool,
     pub shared: bool,
+}
+
+impl TryFrom<String> for Perms {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Perms::parse(&value).ok_or_else(|| format!("无效的权限字符串: {value}"))
+    }
+}
+
+impl From<Perms> for String {
+    fn from(value: Perms) -> Self {
+        value.as_str()
+    }
 }
 
 impl Perms {
@@ -54,7 +71,8 @@ impl Perms {
 }
 
 /// /proc/pid/smaps 中单个 VMA 的统计值，单位统一为字节。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct SmapsStats {
     pub size: u64,
     pub rss: u64,
@@ -66,15 +84,28 @@ pub struct SmapsStats {
     pub swap: u64,
     pub anonymous: u64,
     pub anon_huge: u64,
+    /// 换出页按共享比例摊销后的 PSS 值。
+    pub swap_pss: u64,
+    /// 文件透明大页映射的大小。
+    pub file_pmd_mapped: u64,
+    /// 共享内存透明大页映射的大小。
+    pub shmem_pmd_mapped: u64,
+    /// smaps 的 THPeligible 标志（0/1）。
+    pub thp_eligible: bool,
 }
 
 impl SmapsStats {
-        pub fn private(&self) -> u64 {
+    pub fn private(&self) -> u64 {
         self.private_clean + self.private_dirty
     }
 
     pub fn shared(&self) -> u64 {
         self.shared_clean + self.shared_dirty
+    }
+
+    /// 所有透明大页映射的合计（匿名 + 文件 + 共享内存）。
+    pub fn thp_total(&self) -> u64 {
+        self.anon_huge + self.file_pmd_mapped + self.shmem_pmd_mapped
     }
 
     pub fn merge(&mut self, other: &Self) {
@@ -88,11 +119,16 @@ impl SmapsStats {
         self.swap += other.swap;
         self.anonymous += other.anonymous;
         self.anon_huge += other.anon_huge;
+        self.swap_pss += other.swap_pss;
+        self.file_pmd_mapped += other.file_pmd_mapped;
+        self.shmem_pmd_mapped += other.shmem_pmd_mapped;
+        self.thp_eligible |= other.thp_eligible;
     }
 }
 
 /// treemap 面积所依据的度量。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Metric {
     Virtual,
     Rss,
@@ -130,7 +166,10 @@ impl Metric {
 }
 
 /// 区域类别，用于着色与一级聚合。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Category {
     Heap,
     Stack,
@@ -159,7 +198,7 @@ impl Category {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Vma {
     pub start: u64,
     pub end: u64,

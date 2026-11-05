@@ -7,7 +7,7 @@ use crate::geometry::TargetGeometry;
 use crate::vma::{Perms, SmapsStats, Vma};
 
 /// 一次采集得到的进程地址空间快照。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProcessSnapshot {
     pub pid: i32,
     pub geometry: TargetGeometry,
@@ -151,7 +151,16 @@ pub fn parse_maps(text: &str) -> Vec<Vma> {
         .collect()
 }
 
-fn apply_stat(stats: &mut SmapsStats, line: &str) {
+/// 解析 /proc/pid/smaps_rollup：没有头部行，只有统计行。
+pub fn parse_rollup(text: &str) -> SmapsStats {
+    let mut stats = SmapsStats::default();
+    for line in text.lines() {
+        apply_stat(&mut stats, line);
+    }
+    stats
+}
+
+pub(crate) fn apply_stat(stats: &mut SmapsStats, line: &str) {
     let Some((key, value)) = line.trim().split_once(':') else {
         return;
     };
@@ -170,8 +179,13 @@ fn apply_stat(stats: &mut SmapsStats, line: &str) {
         "Private_Clean" => stats.private_clean = bytes,
         "Private_Dirty" => stats.private_dirty = bytes,
         "Swap" => stats.swap = bytes,
+        "SwapPss" => stats.swap_pss = bytes,
         "Anonymous" => stats.anonymous = bytes,
         "AnonHugePages" => stats.anon_huge = bytes,
+        "FilePmdMapped" => stats.file_pmd_mapped = bytes,
+        "ShmemPmdMapped" => stats.shmem_pmd_mapped = bytes,
+        // THPeligible 是 0/1 标志，不是字节数。
+        "THPeligible" => stats.thp_eligible = kb != 0,
         _ => {}
     }
 }
@@ -234,6 +248,43 @@ AnonHugePages:         4 kB
     fn ignores_garbage_lines() {
         let vmas = parse_smaps("not a mapping\nSize: 4 kB\n\n");
         assert!(vmas.is_empty());
+    }
+
+    #[test]
+    fn parses_extended_smaps_fields() {
+        let text = "\
+700000000000-700000010000 rw-p 00000000 00:00 0 
+Size:                 64 kB
+Rss:                  64 kB
+Pss:                  48 kB
+Swap:                  8 kB
+SwapPss:               4 kB
+AnonHugePages:        32 kB
+FilePmdMapped:         0 kB
+ShmemPmdMapped:       16 kB
+THPeligible:    1
+";
+        let vmas = parse_smaps(text);
+        let stats = vmas[0].stats.as_ref().unwrap();
+        assert_eq!(stats.swap_pss, 4 * 1024);
+        assert_eq!(stats.file_pmd_mapped, 0);
+        assert_eq!(stats.shmem_pmd_mapped, 16 * 1024);
+        assert!(stats.thp_eligible);
+        assert_eq!(stats.thp_total(), 48 * 1024);
+    }
+
+    #[test]
+    fn parses_smaps_rollup_without_header() {
+        let text = "\
+Rss:                 100 kB
+Pss:                  60 kB
+Swap:                  4 kB
+";
+        let stats = parse_rollup(text);
+        assert_eq!(stats.rss, 100 * 1024);
+        assert_eq!(stats.pss, 60 * 1024);
+        assert_eq!(stats.swap, 4 * 1024);
+        assert_eq!(stats.size, 0);
     }
 
     #[test]

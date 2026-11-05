@@ -3,7 +3,9 @@ name = "tmv-ptrace"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 tmv-core.workspace = true
+tmv-symbols.workspace = true
 libc.workspace = true

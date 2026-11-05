@@ -4,13 +4,13 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
-use tmv_core::{Category, MemNode, PageState, PageSummary};
+use tmv_core::{Category, MemNode, PageState, PageSummary, SortOrder};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::App;
+use crate::app::{App, InputTarget, MemoryView, ViewMode};
 use crate::treemap::squarify;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -41,11 +41,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if chunks[1].width >= 72 {
         let main =
             Layout::horizontal([Constraint::Min(30), Constraint::Length(40)]).split(chunks[1]);
-        let layout = draw_treemap(frame, app, main[0]);
+        let layout = if app.view == ViewMode::List {
+            app.last_layout.clear();
+            draw_list(frame, app, main[0]);
+            Vec::new()
+        } else {
+            draw_treemap(frame, app, main[0])
+        };
         app.last_layout = layout;
         draw_detail(frame, app, main[1]);
     } else {
-        let layout = draw_treemap(frame, app, chunks[1]);
+        let layout = if app.view == ViewMode::List {
+            app.last_layout.clear();
+            draw_list(frame, app, chunks[1]);
+            Vec::new()
+        } else {
+            draw_treemap(frame, app, chunks[1])
+        };
         app.last_layout = layout;
     }
 
@@ -56,11 +68,25 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     draw_strip(frame, app, chunks[3]);
     draw_footer(frame, app, chunks[4]);
+    if app.show_settings {
+        draw_settings(frame, app, area);
+    }
+    if app.show_help {
+        draw_help(frame, area);
+    }
+    if app.show_accounting {
+        draw_accounting(frame, app, area);
+    }
+    if app.memory.is_some() {
+        draw_memory(frame, app, area);
+    }
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let name = if app.demo {
         "demo".to_string()
+    } else if app.replay {
+        format!("回放 pid {}", app.pid.unwrap_or_default())
     } else {
         format!("pid {}", app.pid.unwrap_or_default())
     };
@@ -112,6 +138,18 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::Black).bg(Color::Red),
         ));
     }
+    if app.process_exited {
+        spans.push(Span::styled(
+            " 进程已退出 ",
+            Style::default().fg(Color::Black).bg(Color::Red),
+        ));
+    }
+    if let Some((filter, matched, total)) = app.filter_summary() {
+        spans.push(Span::styled(
+            format!(" 过滤:{filter} {matched}/{total} "),
+            Style::default().fg(Color::Black).bg(Color::Cyan),
+        ));
+    }
     if app.diff_enabled && app.diff.has_baseline {
         let color = if app.diff.total > 0 {
             Color::Red
@@ -125,10 +163,24 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
     }
-    if let Some(interval) = app.interval {
+    if app.auto_refresh {
         spans.push(Span::styled(
-            format!(" 自动{}s ", interval.as_secs()),
-            Style::default().fg(Color::DarkGray),
+            format!(" 定时{}s ", app.interval.as_secs()),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else if app.process_exited {
+        spans.push(Span::styled(" 已停止 ", Style::default().fg(Color::Red)));
+    } else {
+        spans.push(Span::styled(" 手动 ", Style::default().fg(Color::DarkGray)));
+    }
+    if app.loading {
+        spans.push(Span::styled(
+            " 采集中… ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ));
     }
     if !app.status.is_empty() {
@@ -245,6 +297,69 @@ fn block_label(node: &MemNode, width: u16, selected: bool, delta: Option<i64>) -
     Some(format!("{marker}{name}{suffix}"))
 }
 
+/// 映射列表：按当前度量降序，展示地址区间、各度量、权限与路径。
+fn draw_list(frame: &mut Frame, app: &App, area: Rect) {
+    if area.height < 3 || area.width == 0 {
+        return;
+    }
+    let rows = app.visible_vmas();
+    let order = match app.sort {
+        SortOrder::SizeDesc => format!("按 {} 降序", app.metric.label()),
+        SortOrder::Address => "按地址升序".to_string(),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" 映射列表 · {} 项 · {order} ", rows.len()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let header = format!(
+        "{:<25} {:>8} {:>8} {:>8} {:>8} {:<5} {}",
+        "地址区间", "虚拟", "RSS", "PSS", "Swap", "权限", "路径"
+    );
+    let mut lines = vec![Line::from(Span::styled(
+        truncate_display(&header, inner.width as usize),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    ))];
+
+    let capacity = inner.height.saturating_sub(1) as usize;
+    if capacity > 0 && !rows.is_empty() {
+        let selected = app.list_index.min(rows.len() - 1);
+        let offset = selected.saturating_sub(capacity - 1);
+        for (index, vma) in rows.iter().enumerate().skip(offset).take(capacity) {
+            let stats = vma.stats.as_ref();
+            let text = format!(
+                "{:<25} {:>8} {:>8} {:>8} {:>8} {:<5} {}",
+                format!("0x{:x}-0x{:x}", vma.start, vma.end),
+                human_bytes(vma.end.saturating_sub(vma.start)),
+                human_bytes(stats.map_or(0, |stats| stats.rss)),
+                human_bytes(stats.map_or(0, |stats| stats.pss)),
+                human_bytes(stats.map_or(0, |stats| stats.swap)),
+                vma.perms.as_str(),
+                vma.label()
+            );
+            let style = if index == selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(
+                truncate_display(&text, inner.width as usize),
+                style,
+            )));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default().borders(Borders::ALL).title(" 详情 ");
     let inner = block.inner(area);
@@ -322,7 +437,7 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(format!("含 {} 个子项", node.children.len())));
         lines.push(Line::from(""));
         let mut top: Vec<&MemNode> = node.children.iter().collect();
-        top.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+        top.sort_by_key(|node| std::cmp::Reverse(node.bytes));
         for child in top.iter().take(8) {
             let change = if app.diff_enabled && app.diff.has_baseline && child.delta != 0 {
                 format!(" {}", signed_bytes(child.delta))
@@ -452,6 +567,12 @@ fn draw_pages(frame: &mut Frame, app: &App, area: Rect) {
                     Rect::new(inner.x, inner.y, inner.width, heat_rows),
                 );
             }
+            _ if app.page_loading => {
+                frame.render_widget(
+                    Paragraph::new("页状态扫描中…").style(Style::default().fg(Color::DarkGray)),
+                    Rect::new(inner.x, inner.y, inner.width, heat_rows),
+                );
+            }
             _ => {
                 frame.render_widget(
                     Paragraph::new("页状态不可用").style(Style::default().fg(Color::DarkGray)),
@@ -549,17 +670,21 @@ fn stack_title(app: &App) -> String {
         "attach 期间暂停"
     };
     format!(
-        " 线程 {}/{} · {} ({}){tls} · {} 帧 · {mode} ",
+        " 线程 {}/{} · {} ({}){tls} · {} 帧 · {} · {mode} ",
         app.thread_index + 1,
         app.threads.len(),
         stack.name,
         stack.tid,
-        stack.frames.len()
+        stack.frames.len(),
+        stack.method.label()
     )
 }
 
 fn page_title(app: &App) -> String {
     let Some(scan) = &app.page_scan else {
+        if app.page_loading {
+            return " 页图 · 扫描中… ".to_string();
+        }
         return match &app.page_error {
             Some(_) => " 页图 · 不可用 ".to_string(),
             None => " 页图 ".to_string(),
@@ -589,15 +714,33 @@ fn page_title(app: &App) -> String {
     if !summary.pfn_available && summary.present > 0 {
         title.push_str(" · PFN 需 root");
     }
+    if let Some(delta) = &app.page_delta {
+        let mut parts = Vec::new();
+        if delta.became_present > 0 {
+            parts.push(format!("驻留+{}", delta.became_present));
+        }
+        if delta.became_swapped > 0 {
+            parts.push(format!("换出+{}", delta.became_swapped));
+        }
+        if delta.became_absent > 0 {
+            parts.push(format!("取消+{}", delta.became_absent));
+        }
+        if delta.became_shared > 0 {
+            parts.push(format!("共享+{}", delta.became_shared));
+        }
+        if delta.became_exclusive > 0 {
+            parts.push(format!("独占+{}", delta.became_exclusive));
+        }
+        if !parts.is_empty() {
+            title.push_str(&format!(" · 变化 {}", parts.join(" ")));
+        }
+    }
     title
 }
 
 fn pct(part: u64, total: u64) -> u64 {
-    if total == 0 {
-        0
-    } else {
-        (part * 100 + total / 2) / total
-    }
+    // 大映射下 part * 100 可能溢出，用饱和乘法；total 为 0 时按分母 1 处理。
+    part.saturating_mul(100).saturating_add(total / 2) / total.max(1)
 }
 
 /// 未映射百分比取补数，避免三项四舍五入后合计超过 100%。
@@ -659,22 +802,200 @@ fn draw_strip(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let (text, color) = match &app.input {
+        Some(input) if app.input_target == InputTarget::Filter => (
+            format!(" 过滤(路径/权限): {input}▏  Enter 应用  Esc 取消"),
+            Color::Cyan,
+        ),
         Some(input) => (
             format!(" 地址(十六进制): {input}▏  Enter 解析  Esc 取消"),
             Color::Yellow,
         ),
+        None if app.show_settings => (
+            " ↑↓ 选择  ←→ 调整  Enter 切换  Esc 关闭".to_string(),
+            Color::Yellow,
+        ),
+        None if app.show_accounting => (
+            " r 重新采集  Esc 关闭账务面板".to_string(),
+            Color::Yellow,
+        ),
+        None if app.memory.is_some() => (
+            " ↑↓ 滚动  PgUp/PgDn 翻页  Home/End 首尾  Esc 关闭".to_string(),
+            Color::Yellow,
+        ),
         None if app.show_threads => (
-            " [ ] 切换线程  u 重新回溯  t 关闭栈  / 地址  m 指标  d 变化  r 刷新  q 退出"
+            " [ ] 切换线程  u 重新回溯  t 关闭栈  / 地址  s 设置  r 刷新  rr 定时  q 退出"
                 .to_string(),
             Color::DarkGray,
         ),
         None => (
-            " ←→↑↓ 选择  Enter 下钻  Esc 返回  / 地址  m 指标  g 分组  o 排序  d 变化  p 页图  t 栈  r 刷新  q 退出"
+            " ←→↑↓ 选择  Enter 下钻  Esc 返回  v 视图  / 地址  f 过滤  m 指标  g 分组  o 排序  p 页图  t 栈  a 账务  x 内存  s 设置  ? 帮助  r 刷新  rr 定时  q 退出"
                 .to_string(),
             Color::DarkGray,
         ),
     };
     frame.render_widget(Paragraph::new(text).style(Style::default().fg(color)), area);
+}
+
+/// 帮助面板里的按键说明，按「分类 / 按键 / 说明」预排版，避免中英混排错位。
+const HELP_LINES: [&str; 13] = [
+    " 移动   ←→↑↓ / hjkl    选择相邻块；列表视图逐行移动",
+    " 导航   Enter / Esc     下钻 / 返回；列表视图切回 treemap",
+    " 视图   v               treemap ↔ 映射列表",
+    " 过滤   f               路径 / 标签 / 权限，Enter 应用",
+    " 地址   /               解析十六进制地址并跳转",
+    " 度量   m               PSS / RSS / 虚拟 / 独占 / 共享 / Swap",
+    " 分组   g               类别 / 文件 / 映射",
+    " 排序   o               大小 / 地址（同时作用于列表）",
+    " 面板   p t a           页图 / 线程栈 / 账务",
+    " 内存   x               十六进制查看当前映射内容",
+    " 刷新   r rr s          立即刷新 / 定时刷新 / 设置",
+    " 进程   Esc q           根层 Esc 退出；q 随时退出",
+    " 关闭   任意键          关闭本帮助",
+];
+
+fn draw_help(frame: &mut Frame, area: Rect) {
+    let width = 62.min(area.width.saturating_sub(4));
+    let height = (HELP_LINES.len() as u16 + 2).min(area.height.saturating_sub(2));
+    if width < 40 || height < 6 {
+        return;
+    }
+    let rect = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" 帮助 ")
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let lines: Vec<Line> = HELP_LINES
+        .iter()
+        .take(inner.height as usize)
+        .map(|line| {
+            Line::from(Span::styled(
+                truncate_display(line, inner.width as usize),
+                Style::default(),
+            ))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
+    let width = 46.min(area.width.saturating_sub(4));
+    let height = 9.min(area.height.saturating_sub(2));
+    if width < 20 || height < 6 {
+        return;
+    }
+    let rect = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" 设置 ")
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    if inner.height < 3 || inner.width == 0 {
+        return;
+    }
+
+    let items = [
+        ("定时刷新", if app.auto_refresh { "开" } else { "关" }),
+        ("刷新间隔", ""),
+        ("页图", if app.show_pages { "开" } else { "关" }),
+        ("变化标记", if app.diff_enabled { "开" } else { "关" }),
+    ];
+    for (index, (label, value)) in items.iter().enumerate() {
+        if index as u16 >= inner.height.saturating_sub(1) {
+            break;
+        }
+        let selected = index == app.settings_index;
+        let marker = if selected { "▶ " } else { "  " };
+        let value = if *label == "刷新间隔" {
+            format!("{}s", app.interval.as_secs())
+        } else {
+            (*value).to_string()
+        };
+        let style = if selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        frame.render_widget(
+            Paragraph::new(format!("{marker}{label}  {value}")).style(style),
+            Rect::new(inner.x, inner.y + index as u16, inner.width, 1),
+        );
+    }
+
+    let hint = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+    frame.render_widget(
+        Paragraph::new("↑↓ 选择  ←→ 调整  Enter 切换  Esc 关闭")
+            .style(Style::default().fg(Color::DarkGray)),
+        hint,
+    );
+}
+
+fn draw_accounting(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(accounting) = &app.accounting else {
+        return;
+    };
+    let lines = tmv_core::accounting::lines(accounting, &app.snapshot);
+    let width = 104.min(area.width.saturating_sub(4));
+    let height = (lines.len() as u16 + 3).min(area.height.saturating_sub(2));
+    if width < 48 || height < 6 {
+        return;
+    }
+    let rect = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" 内存账务 ")
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    if inner.height < 2 || inner.width == 0 {
+        return;
+    }
+
+    let body_height = inner.height.saturating_sub(1);
+    for (index, line) in lines.iter().enumerate() {
+        if index as u16 >= body_height {
+            break;
+        }
+        let style = if line.starts_with("差异") {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        frame.render_widget(
+            Paragraph::new(truncate_display(line, inner.width as usize)).style(style),
+            Rect::new(inner.x, inner.y + index as u16, inner.width, 1),
+        );
+    }
+
+    let hint = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+    frame.render_widget(
+        Paragraph::new("r 重新采集  Esc 关闭").style(Style::default().fg(Color::DarkGray)),
+        hint,
+    );
 }
 
 fn category_color(category: Category) -> Color {
@@ -718,6 +1039,87 @@ pub fn human_bytes(bytes: u64) -> String {
 fn signed_bytes(delta: i64) -> String {
     let marker = if delta >= 0 { '▲' } else { '▼' };
     format!("{marker}{}", human_bytes(delta.unsigned_abs()))
+}
+
+/// 内存查看器：地址 + 十六进制 + ASCII，类似 gdb 的 `x` 命令。
+fn draw_memory(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(view) = &app.memory else {
+        return;
+    };
+    // 16 列地址 + 47 列 hex + 18 列 ASCII + 间距 ≈ 88 列。
+    let width = 92.min(area.width.saturating_sub(2));
+    let height = 24.min(area.height.saturating_sub(2));
+    if width < 60 || height < 5 {
+        return;
+    }
+    let rect = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, rect);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(
+            " 内存 · pid {} · 0x{:x} · ↑↓ PgUp/PgDn，Esc 关闭 ",
+            app.pid.unwrap_or_default(),
+            view.base
+        ))
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    if let Some(error) = &view.error {
+        let line = Line::from(Span::styled(
+            truncate_display(&format!("无法读取: {error}"), inner.width as usize),
+            Style::default().fg(Color::Red),
+        ));
+        frame.render_widget(Paragraph::new(vec![line]), inner);
+        return;
+    }
+
+    let visible = inner.height as usize;
+    let first = view.scroll.min(view.line_count().saturating_sub(1));
+    let mut lines = Vec::with_capacity(visible);
+    for (index, chunk) in view
+        .bytes
+        .chunks(MemoryView::LINE)
+        .enumerate()
+        .skip(first)
+        .take(visible)
+    {
+        let address = view.base + (index * MemoryView::LINE) as u64;
+        lines.push(memory_line(address, chunk, inner.width as usize));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// 一行 hexdump。
+fn memory_line(address: u64, bytes: &[u8], width: usize) -> Line<'static> {
+    let mut hex = String::with_capacity(MemoryView::LINE * 3);
+    for index in 0..MemoryView::LINE {
+        if index > 0 {
+            hex.push(' ');
+        }
+        match bytes.get(index) {
+            Some(byte) => hex.push_str(&format!("{byte:02x}")),
+            None => hex.push_str("  "),
+        }
+    }
+    let ascii: String = (0..MemoryView::LINE)
+        .map(|index| match bytes.get(index) {
+            Some(byte) if byte.is_ascii_graphic() || *byte == b' ' => *byte as char,
+            Some(_) => '.',
+            None => ' ',
+        })
+        .collect();
+
+    Line::from(Span::styled(
+        truncate_display(&format!("{address:016x}  {hex}  |{ascii}|"), width),
+        Style::default(),
+    ))
 }
 
 fn truncate_display(text: &str, max_width: usize) -> String {
@@ -775,6 +1177,53 @@ mod tests {
     }
 
     #[test]
+    fn memory_modal_renders_hexdump_and_errors() {
+        let mut app = App::new(demo::snapshot(), None, true, false);
+        app.open_memory();
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        dump_screen(&terminal);
+
+        let text: String = screen_text(&terminal)
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        assert!(text.contains("内存"), "内存面板标题未渲染: {text}");
+        assert!(text.contains('|'), "ASCII 栏未渲染");
+
+        // 回放模式打开同一面板时，应显示不可读原因。
+        let mut replay = App::new(demo::snapshot(), None, false, false);
+        replay.set_replay(true);
+        replay.open_memory();
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut replay)).unwrap();
+        let text: String = screen_text(&terminal)
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        assert!(text.contains("无法读取"), "未显示读取失败原因: {text}");
+    }
+
+    #[test]
+    fn replay_header_marks_mode() {
+        let mut app = App::new(demo::snapshot(), None, false, false);
+        app.pid = Some(app.snapshot.pid);
+        app.set_replay(true);
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        dump_screen(&terminal);
+
+        let text: String = screen_text(&terminal)
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        assert!(text.contains("回放pid"), "状态行未标注回放: {text}");
+    }
+
+    #[test]
     fn demo_renders_treemap_and_detail() {
         let mut app = App::new(demo::snapshot(), None, true, false);
         let backend = TestBackend::new(120, 40);
@@ -827,6 +1276,23 @@ mod tests {
     }
 
     #[test]
+    fn settings_modal_renders_interval() {
+        let mut app = App::new(demo::snapshot(), None, true, false);
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let text = screen_text(&terminal);
+        assert!(text.contains('设'), "设置弹窗未渲染");
+        assert!(text.contains('隔'), "缺少间隔配置项");
+        assert!(text.contains("5s"), "应显示默认间隔");
+        assert!(text.contains('手'), "未开启定时刷新时应显示手动");
+        dump_screen(&terminal);
+    }
+
+    #[test]
     fn thread_stack_panel_renders() {
         let mut app = App::new(demo::snapshot(), None, true, false);
         app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
@@ -840,5 +1306,85 @@ mod tests {
         assert!(text.contains("#0"), "缺少回溯帧");
         assert!(text.contains("TLS"), "缺少 TLS 信息");
         dump_screen(&terminal);
+    }
+
+    #[test]
+    fn accounting_modal_renders_sections() {
+        let mut app = App::new(demo::snapshot(), None, true, false);
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+
+        let backend = TestBackend::new(140, 44);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let text = screen_text(&terminal);
+        assert!(text.contains('账'), "账务面板未渲染");
+        assert!(text.contains("KSM"), "缺少 KSM 段");
+        assert!(text.contains("cgroup"), "缺少 cgroup 段");
+        assert!(text.contains("NUMA"), "缺少 NUMA 段");
+        dump_screen(&terminal);
+    }
+
+    #[test]
+    fn page_title_reports_delta() {
+        let mut app = App::new(demo::snapshot(), None, true, false);
+        app.page_delta = Some(tmv_core::PageDelta {
+            became_present: 3,
+            became_swapped: 2,
+            ..Default::default()
+        });
+
+        let backend = TestBackend::new(150, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let text = screen_text(&terminal);
+        assert!(text.contains('变'), "页图标题未显示变化");
+        assert!(text.contains("+3"), "缺少新驻留页计数");
+    }
+
+    #[test]
+    fn list_view_renders_rows_and_filter_badge() {
+        let mut app = App::new(demo::snapshot(), None, true, false);
+        app.apply_filter("libc");
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+
+        let backend = TestBackend::new(140, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        dump_screen(&terminal);
+
+        // 宽字符在缓冲区里占两格，拼接时中间会插入空格，比较前先去掉空白。
+        let text: String = screen_text(&terminal)
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        assert!(text.contains("映射列表"), "列表视图未渲染");
+        assert!(text.contains("RSS"), "缺少 RSS 列");
+        assert!(text.contains("过滤:libc"), "状态行未显示过滤条件");
+        assert!(text.contains("libc"), "列表行应包含 libc 路径");
+        assert!(
+            !app.last_layout.iter().any(|rect| rect.width > 0),
+            "列表视图不应产生 treemap 布局"
+        );
+    }
+
+    #[test]
+    fn help_modal_renders_key_reference() {
+        let mut app = App::new(demo::snapshot(), None, true, false);
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        dump_screen(&terminal);
+
+        let text: String = screen_text(&terminal)
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        assert!(text.contains("帮助"), "帮助面板未渲染");
+        assert!(text.contains("映射列表"), "缺少视图切换说明");
+        assert!(text.contains("关闭本帮助"), "缺少关闭提示");
     }
 }

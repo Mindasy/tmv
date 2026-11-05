@@ -1,2 +1,6 @@
 target
-Cargo.lock
+
+# 打包产物：vendor 与 .cargo/config.toml 由 cargo vendor 在本地生成，不入库
+/vendor
+/.cargo/config.toml
+/*.tar.gz
