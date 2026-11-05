@@ -7,8 +7,8 @@ use clap::{Parser, ValueEnum};
 use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::DefaultTerminal;
 use tmv_core::{
-    accounting, build_tree, demo, export, Accounting, DiffSummary, GroupBy, Metric,
-    ProcessSnapshot, SnapshotDocument, SortOrder, TreeOptions,
+    accounting, apply_deltas, build_tree, demo, diff, export, Accounting, DiffSummary, GroupBy,
+    Metric, ProcessSnapshot, SnapshotDocument, SortOrder, TreeOptions,
 };
 use tmv_symbols::SymbolEngine;
 use tmv_tui::{ui, App, Config};
@@ -85,6 +85,16 @@ struct Args {
     )]
     svg: Option<PathBuf>,
 
+    /// SVG 布局：treemap（可点击下钻）或 flame（火焰图）
+    #[arg(
+        long,
+        value_name = "FORMAT",
+        value_enum,
+        default_value = "treemap",
+        requires = "svg"
+    )]
+    svg_format: SvgFormatArg,
+
     /// 回溯主线程调用栈后退出（需要 ptrace 权限）
     #[arg(long, conflicts_with_all = ["json", "report", "lookup"])]
     stack: bool,
@@ -102,6 +112,22 @@ enum MetricArg {
     Private,
     Shared,
     Swap,
+}
+
+/// SVG 导出布局。
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SvgFormatArg {
+    Treemap,
+    Flame,
+}
+
+impl From<SvgFormatArg> for tmv_tui::svg::SvgFormat {
+    fn from(value: SvgFormatArg) -> Self {
+        match value {
+            SvgFormatArg::Treemap => Self::Treemap,
+            SvgFormatArg::Flame => Self::Flame,
+        }
+    }
 }
 
 impl From<MetricArg> for Metric {
@@ -141,7 +167,7 @@ fn main() -> Result<()> {
     }
 
     if let Some(path) = &args.svg {
-        write_svg(&args, &snapshot, path);
+        write_svg(&args, &snapshot, baseline.as_ref(), path);
     }
 
     if args.stack {
@@ -425,10 +451,16 @@ fn parse_len(text: &str) -> Result<usize, String> {
     usize::try_from(value).map_err(|_| format!("长度过大: {text}"))
 }
 
-/// 导出两层 treemap 为 SVG；分组与排序沿用界面默认值。
-fn write_svg(args: &Args, snapshot: &ProcessSnapshot, path: &Path) {
+/// 导出 treemap / 火焰图为 SVG；给了基线就顺带画涨跌条带。
+fn write_svg(
+    args: &Args,
+    snapshot: &ProcessSnapshot,
+    baseline: Option<&ProcessSnapshot>,
+    path: &Path,
+) {
     let metric = resolve_metric(args, snapshot);
-    let tree = build_tree(
+    let format = tmv_tui::svg::SvgFormat::from(args.svg_format);
+    let mut tree = build_tree(
         snapshot,
         TreeOptions {
             metric,
@@ -436,10 +468,30 @@ fn write_svg(args: &Args, snapshot: &ProcessSnapshot, path: &Path) {
             sort: SortOrder::SizeDesc,
         },
     );
+    let mut subtitle = format!(
+        "度量 {} · 合计 {} · {} 个 VMA",
+        metric.label(),
+        tmv_tui::ui::human_bytes(tree.bytes),
+        snapshot.vmas.len()
+    );
+    if let Some(before) = baseline {
+        let changes = diff::diff(before, snapshot, metric);
+        apply_deltas(&mut tree, &changes);
+        if changes.total != 0 {
+            let sign = if changes.total > 0 { '+' } else { '-' };
+            subtitle.push_str(&format!(
+                " · 变化 {sign}{}",
+                tmv_tui::ui::human_bytes(changes.total.unsigned_abs())
+            ));
+        }
+    }
+
     let svg = tmv_tui::svg::render(
         &tree,
         &tmv_tui::svg::SvgOptions {
-            title: format!("tmv · pid {} · 面积 = {}", snapshot.pid, metric.label()),
+            title: format!("tmv · pid {}", snapshot.pid),
+            subtitle,
+            format,
             ..Default::default()
         },
     );
@@ -448,8 +500,9 @@ fn write_svg(args: &Args, snapshot: &ProcessSnapshot, path: &Path) {
         std::process::exit(4);
     }
     println!(
-        "已导出 {}（{} 个分组，度量 {}）",
+        "已导出 {}（{}，{} 个分组，度量 {}）",
         path.display(),
+        format.label(),
         tree.children.len(),
         metric.label()
     );

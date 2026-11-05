@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::diff::Diff;
 use crate::proc::ProcessSnapshot;
 use crate::vma::{Category, Metric, Vma};
 
@@ -176,6 +177,29 @@ fn sort_nodes(nodes: &mut [MemNode], sort: SortOrder) {
             nodes.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.start.cmp(&b.start)))
         }
     }
+}
+
+/// 把叶子差值汇总到每个节点上，返回值是子树总差值。
+///
+/// TUI 和 SVG 导出共用：改基线的块都会带上 `delta`，便于着色。
+pub fn apply_deltas(node: &mut MemNode, diff: &Diff) -> i64 {
+    if node.children.is_empty() {
+        let delta = node
+            .vma
+            .as_ref()
+            .and_then(|vma| diff.by_start.get(&vma.start))
+            .copied()
+            .unwrap_or(0);
+        node.delta = delta;
+        return delta;
+    }
+
+    let mut total = 0;
+    for child in &mut node.children {
+        total += apply_deltas(child, diff);
+    }
+    node.delta = total;
+    total
 }
 
 #[cfg(test)]

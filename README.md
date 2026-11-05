@@ -89,7 +89,10 @@
 - `--metric <virtual|rss|pss|private|shared|swap>`：指定面积与差值使用的度量
 - `--lookup <ADDR>`：解析十六进制地址并打印模块 / 符号 / 源码行，适合脚本与现场排查
 - `--read <ADDR[:LEN]>`：读取内存并按 `xxd` 风格打印（默认 256 字节，上限 64 KiB），不进入 TUI
-- `--svg <FILE>`：把两层 treemap 导出为 SVG（分组 → 叶子，带配色与标签），适合放进文档或工单
+- `--svg <FILE>`：导出可交互的 SVG（`--svg-format treemap|flame`）
+  - treemap：与界面一致的布局，悬停显示路径 / 大小 / 地址区间 / 权限，点击分组可下钻（内嵌 JS，单文件无外部依赖）
+  - flame：横向火焰图，按「总量 → 分组 → 映射」三层堆叠，适合看增长链条
+  - 底部图例、标题里的度量与合计；给了 `--baseline` 时块底部画涨（绿）/ 跌（红）条带
 - `--stack`：回溯主线程调用栈并逐帧打印模块 / 符号 / 源码行，标题标出所用算法
 - 退出码区分失败原因，便于脚本判断（见下表）
 
@@ -185,7 +188,9 @@ chmod +x /tmp/tmv
 | `./tmv <pid> --report --metric rss --top 20` | 指定度量与条目数 |
 | `./tmv <pid> --lookup 0xffffa5d1a748` | 解析单个地址后退出 |
 | `./tmv <pid> --read 0xffffa5d1a748:128` | 读取 128 字节并按 `xxd` 风格打印 |
-| `./tmv <pid> --svg mem.svg` | 导出 treemap 为 SVG 后退出 |
+| `./tmv <pid> --svg mem.svg` | 导出交互式 treemap（点击分组下钻） |
+| `./tmv <pid> --svg flame.svg --svg-format flame` | 导出火焰图 |
+| `./tmv <pid> --svg diff.svg --baseline base.json` | 导出带涨跌条带的 treemap |
 | `./tmv <pid> --stack` | 回溯主线程调用栈后退出 |
 | `./tmv --demo` | 合成数据预览，可在 macOS 直接运行 |
 | `./tmv <pid> --no-config` | 不读写 `~/.config/tmv/config.toml` |

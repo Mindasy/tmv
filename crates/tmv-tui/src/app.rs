@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use tmv_core::{
-    build_tree, demo, diff, pagemap, Accounting, Diff, GroupBy, MemNode, Metric, PageDelta,
-    PageScan, ProcessSnapshot, ProcessWatch, SortOrder, TargetGeometry, TreeOptions, Vma,
+    apply_deltas, build_tree, demo, diff, pagemap, Accounting, Diff, GroupBy, MemNode, Metric,
+    PageDelta, PageScan, ProcessSnapshot, ProcessWatch, SortOrder, TargetGeometry, TreeOptions,
+    Vma,
 };
 use tmv_ptrace::{self as ptrace, ThreadInfo, ThreadStack};
 use tmv_symbols::{Resolved, SymbolEngine};
@@ -1429,27 +1430,6 @@ fn find_path(node: &MemNode, address: u64) -> Option<Vec<usize>> {
         }
     }
     None
-}
-
-/// 把叶子差值汇总到每个节点上，返回值是子树总差值。
-fn apply_deltas(node: &mut MemNode, diff: &Diff) -> i64 {
-    if node.children.is_empty() {
-        let delta = node
-            .vma
-            .as_ref()
-            .and_then(|vma| diff.by_start.get(&vma.start))
-            .copied()
-            .unwrap_or(0);
-        node.delta = delta;
-        return delta;
-    }
-
-    let mut total = 0;
-    for child in &mut node.children {
-        total += apply_deltas(child, diff);
-    }
-    node.delta = total;
-    total
 }
 
 /// demo 模式下每次刷新把 heap 的驻留抬高一点，方便预览 diff。

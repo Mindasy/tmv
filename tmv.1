@@ -71,7 +71,14 @@ style, then exit. \fILEN\fR defaults to 256 bytes and is capped at 65536.
 Unwind the main thread and print symbolized frames, then exit.
 .TP
 .BI \-\-svg " FILE"
-Render the current treemap to an SVG file and exit.
+Render the address space to a self-contained SVG file and exit.  Every block
+carries a hover tooltip (path, size, address range, permissions); with the
+treemap layout, clicking a group zooms into it (inline JavaScript, no external
+assets).
+.TP
+.BI \-\-svg\-format " FORMAT"
+Layout used by \fB\-\-svg\fR: \fBtreemap\fR (default, drill-down) or
+\fBflame\fR (horizontal icicle graph).
 .TP
 .B \-\-no\-config
 Do not read or write the configuration file.
@@ -160,7 +167,13 @@ Print the twenty largest mappings.
 Hex-dump 128 bytes at a given address.
 .TP
 .B tmv 4242 \-\-svg mem.svg
-Export the treemap as an SVG file.
+Export the treemap as an interactive SVG file.
+.TP
+.B tmv 4242 \-\-svg flame.svg \-\-svg\-format flame
+Export the address space as a flame graph.
+.TP
+.B tmv 4242 \-\-svg diff.svg \-\-baseline base.json
+Highlight growth and shrinkage against a saved baseline.
 .TP
 .B tmv \-\-demo
 Preview the interface on a non-Linux host.

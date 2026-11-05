@@ -17,6 +17,6 @@ pub use export::{report, DiffEntry, DiffSummary, SnapshotDocument};
 pub use geometry::TargetGeometry;
 pub use pagemap::{PageDelta, PageScan, PageState, PageSummary};
 pub use proc::ProcessSnapshot;
-pub use tree::{build_tree, GroupBy, MemNode, SortOrder, TreeOptions};
+pub use tree::{apply_deltas, build_tree, GroupBy, MemNode, SortOrder, TreeOptions};
 pub use vma::{Category, Metric, Perms, SmapsStats, Vma};
 pub use watch::ProcessWatch;
