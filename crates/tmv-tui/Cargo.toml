@@ -11,4 +11,5 @@ tmv-symbols.workspace = true
 tmv-ptrace.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
+regex.workspace = true
 unicode-width.workspace = true

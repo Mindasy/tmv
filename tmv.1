@@ -1,0 +1,171 @@
+.TH TMV 1 "2026-11-05" "tmv 0.1.0" "User Commands"
+.SH NAME
+tmv \- treemap viewer for a process virtual address space
+.SH SYNOPSIS
+.B tmv
+[\fIPID\fR]
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B tmv
+reads the virtual memory map of a running Linux process from
+.IR /proc/\fIPID\fR
+and renders the address space as a
+.BR WizTree -style
+treemap: every rectangle is a mapping, and its area is proportional to the
+selected metric (virtual size, RSS, PSS, private, shared or swap).
+.PP
+Sampling is read-only and requires either the same user ID as the target or
+.BR CAP_SYS_PTRACE .
+Without \fBsmaps\fR permissions the viewer falls back to virtual sizes.
+.PP
+The interface is a full-screen TUI; press \fB?\fR for the key reference and
+\fBq\fR to quit. Memory contents can be inspected with \fBx\fR, which reads from
+.IR /proc/\fIPID\fR/mem .
+.SH OPTIONS
+.TP
+.B \fIPID\fR
+Target process ID. Required unless \fB\-\-demo\fR or \fB\-\-replay\fR is used.
+.TP
+.B \-\-demo
+Use synthetic data so the interface can be previewed without a Linux process.
+.TP
+.BI \-\-replay " FILE"
+Replay a snapshot written by \fB\-\-json\fR or \fB\-\-save\-baseline\fR.
+No sampling or process attachment takes place.
+.TP
+.BI \-\-interval " SECONDS"
+Auto-refresh interval; \fB0\fR (the default) refreshes only when
+.B r
+is pressed.
+.TP
+.B \-\-json
+Print the snapshot as JSON and exit.
+.TP
+.B \-\-report
+Print a text report and exit.
+.TP
+.BI \-\-top " N"
+Number of entries in the report and diff lists (default \fB10\fR).
+.TP
+.BI \-\-baseline " FILE"
+Load a snapshot used as the comparison baseline.
+.TP
+.BI \-\-save\-baseline " FILE"
+Write the current snapshot to
+.I FILE
+as JSON.
+.TP
+.BI \-\-metric " METRIC"
+Metric used for areas and diffs: \fBvirtual\fR, \fBrss\fR, \fBpss\fR,
+\fBprivate\fR, \fBshared\fR or \fBswap\fR.
+.TP
+.BI \-\-lookup " ADDR"
+Resolve a hexadecimal address to module, symbol and source line, then exit.
+.TP
+.BI \-\-read " ADDR[:LEN]"
+Read memory at a hexadecimal address and print it in
+.BR xxd (1)
+style, then exit. \fILEN\fR defaults to 256 bytes and is capped at 65536.
+.TP
+.B \-\-stack
+Unwind the main thread and print symbolized frames, then exit.
+.TP
+.BI \-\-svg " FILE"
+Render the current treemap to an SVG file and exit.
+.TP
+.B \-\-no\-config
+Do not read or write the configuration file.
+.TP
+.BR \-h ", " \-\-help
+Print usage information.
+.TP
+.BR \-V ", " \-\-version
+Print version information.
+.SH KEYS
+.TP
+.B arrows, hjkl
+Move the selection; in list view move row by row.
+.TP
+.BR Enter ", " Esc
+Descend into the selected block / go back one level.
+.TP
+.B v
+Toggle between treemap and a flat mapping list.
+.TP
+.B f
+Filter mappings by path, label or permissions (substring).
+.TP
+.B F
+Filter mappings with a case-insensitive regular expression.
+.TP
+.B /
+Resolve a hexadecimal address and jump to it.
+.TP
+.BR m ", " g ", " o
+Cycle metric, grouping and sort order.
+.TP
+.BR p ", " t ", " a
+Toggle page map, thread stacks and accounting panel.
+.TP
+.B x
+Hex-dump the mapping under the cursor.
+.TP
+.B s
+Open the settings panel.
+.TP
+.B r
+Refresh once; press twice quickly to toggle auto-refresh.
+.TP
+.B q
+Quit.
+.SH FILES
+.TP
+.I ~/.config/tmv/config.toml
+Interface preferences written on exit; override the location with
+.BR TMV_CONFIG .
+.TP
+.I /proc/PID/maps, /proc/PID/smaps
+Address space and per-mapping accounting.
+.TP
+.I /proc/PID/mem
+Memory contents, used by \fBx\fR and \fB\-\-read\fR.
+.TP
+.I /proc/PID/pagemap
+Page residency, requires \fBCAP_SYS_ADMIN\fR.
+.SH "EXIT STATUS"
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Invalid command line argument.
+.TP
+.B 2
+Process not found, or address without a symbol.
+.TP
+.B 3
+Insufficient permissions.
+.TP
+.B 4
+Other collection error, unsupported platform, or invalid snapshot file.
+.SH EXAMPLES
+.TP
+.B tmv 4242
+Inspect process 4242 interactively.
+.TP
+.B tmv 4242 \-\-report \-\-top 20
+Print the twenty largest mappings.
+.TP
+.B tmv 4242 \-\-read 0x7f0000000000:128
+Hex-dump 128 bytes at a given address.
+.TP
+.B tmv 4242 \-\-svg mem.svg
+Export the treemap as an SVG file.
+.TP
+.B tmv \-\-demo
+Preview the interface on a non-Linux host.
+.SH "SEE ALSO"
+.BR ps (1),
+.BR proc (5),
+.BR readelf (1),
+.BR gdb (1)

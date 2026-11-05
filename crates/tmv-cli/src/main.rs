@@ -7,10 +7,20 @@ use clap::{Parser, ValueEnum};
 use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::DefaultTerminal;
 use tmv_core::{
-    accounting, demo, export, Accounting, DiffSummary, Metric, ProcessSnapshot, SnapshotDocument,
+    accounting, build_tree, demo, export, Accounting, DiffSummary, GroupBy, Metric,
+    ProcessSnapshot, SnapshotDocument, SortOrder, TreeOptions,
 };
 use tmv_symbols::SymbolEngine;
-use tmv_tui::{ui, App};
+use tmv_tui::{ui, App, Config};
+
+/// `--read` 默认读取的字节数。
+const DEFAULT_READ_LEN: usize = 256;
+
+/// `--read` 单次读取上限，避免误输入一次读走大量内存。
+const MAX_READ_LEN: usize = 64 * 1024;
+
+/// `--read` 每行展示的字节数，与 `xxd` 一致。
+const READ_LINE: usize = 16;
 
 /// 以 treemap 方式查看进程虚拟地址空间（主要面向 Linux arm64）。
 #[derive(Debug, Parser)]
@@ -59,9 +69,29 @@ struct Args {
     #[arg(long, value_name = "ADDR", conflicts_with_all = ["json", "report"])]
     lookup: Option<String>,
 
+    /// 读取内存并以十六进制输出后退出（ADDR[:LEN]，默认 256 字节）
+    #[arg(
+        long,
+        value_name = "ADDR[:LEN]",
+        conflicts_with_all = ["json", "report", "lookup", "stack"]
+    )]
+    read: Option<String>,
+
+    /// 把当前 treemap 导出为 SVG 后退出
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with_all = ["json", "report", "lookup", "read", "stack"]
+    )]
+    svg: Option<PathBuf>,
+
     /// 回溯主线程调用栈后退出（需要 ptrace 权限）
     #[arg(long, conflicts_with_all = ["json", "report", "lookup"])]
     stack: bool,
+
+    /// 不读写 ~/.config/tmv/config.toml
+    #[arg(long)]
+    no_config: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -106,6 +136,14 @@ fn main() -> Result<()> {
         lookup_address(&args, &snapshot, text);
     }
 
+    if let Some(spec) = &args.read {
+        print_memory(&args, &snapshot, spec);
+    }
+
+    if let Some(path) = &args.svg {
+        write_svg(&args, &snapshot, path);
+    }
+
     if args.stack {
         if args.replay.is_some() {
             eprintln!("Error: 回放模式不能回溯调用栈（没有可 attach 的进程）");
@@ -142,6 +180,13 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // 只影响 TUI 的偏好；--json / --report 等一次性输出不会读写配置。
+    let config = if args.no_config {
+        Config::default()
+    } else {
+        Config::load()
+    };
+
     let mut terminal = match ratatui::try_init() {
         Ok(terminal) => terminal,
         Err(err) => {
@@ -150,6 +195,7 @@ fn main() -> Result<()> {
         }
     };
     let mut app = App::new(snapshot, args.pid, args.demo, privileged);
+    app.apply_config(&config);
     if args.replay.is_some() {
         // 回放不 spawn 采集线程，pid 只用于界面显示。
         app.pid = Some(app.snapshot.pid);
@@ -166,6 +212,12 @@ fn main() -> Result<()> {
     }
     let result = run(&mut terminal, &mut app);
     ratatui::restore();
+    if !args.no_config {
+        // 退出时把界面偏好写回，下次启动沿用；写失败不影响退出码。
+        if let Err(err) = app.to_config().save() {
+            eprintln!("Warning: 无法保存配置: {err}");
+        }
+    }
     result
 }
 
@@ -273,6 +325,134 @@ fn lookup_address(args: &Args, snapshot: &ProcessSnapshot, text: &str) {
     if let Some(location) = resolved.location() {
         println!("  {location}");
     }
+    std::process::exit(0);
+}
+
+/// 读取一段内存并按 `xxd` 风格输出；不进入 TUI。
+fn print_memory(args: &Args, snapshot: &ProcessSnapshot, spec: &str) {
+    let (address, len) = match parse_read_spec(spec) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("Error: {err}");
+            std::process::exit(1);
+        }
+    };
+    if args.replay.is_some() {
+        eprintln!("Error: 回放模式没有内存内容（快照不含页数据）");
+        std::process::exit(4);
+    }
+
+    let bytes = if args.demo {
+        demo::memory(address, len)
+    } else {
+        match tmv_ptrace::read_memory(snapshot.pid, address, len) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                let hint = tmv_ptrace::permission_hint(&err)
+                    .map(|hint| format!("（{hint}）"))
+                    .unwrap_or_default();
+                eprintln!("Error: 读取 0x{address:x} 失败: {err}{hint}");
+                let code = if err.kind() == ErrorKind::PermissionDenied {
+                    3
+                } else {
+                    4
+                };
+                std::process::exit(code);
+            }
+        }
+    };
+
+    println!(
+        "pid {} · 0x{address:x} · {} 字节",
+        snapshot.pid,
+        bytes.len()
+    );
+    for (index, chunk) in bytes.chunks(READ_LINE).enumerate() {
+        let line = address + (index * READ_LINE) as u64;
+        let mut hex = String::with_capacity(READ_LINE * 3);
+        for offset in 0..READ_LINE {
+            hex.push(' ');
+            match chunk.get(offset) {
+                Some(byte) => hex.push_str(&format!("{byte:02x}")),
+                None => hex.push_str("  "),
+            }
+        }
+        let ascii: String = (0..READ_LINE)
+            .map(|offset| match chunk.get(offset) {
+                Some(byte) if byte.is_ascii_graphic() || *byte == b' ' => *byte as char,
+                Some(_) => '.',
+                None => ' ',
+            })
+            .collect();
+        println!("{line:016x}{hex}  |{ascii}|");
+    }
+    std::process::exit(0);
+}
+
+/// 解析 `ADDR[:LEN]`：地址按十六进制，长度支持十进制与 `0x` 前缀。
+fn parse_read_spec(spec: &str) -> Result<(u64, usize), String> {
+    let (address_text, len_text) = match spec.split_once(':') {
+        Some((address, len)) => (address, Some(len)),
+        None => (spec, None),
+    };
+
+    let digits = address_text
+        .trim()
+        .trim_start_matches("0x")
+        .trim_start_matches("0X");
+    let address =
+        u64::from_str_radix(digits, 16).map_err(|_| format!("地址无效: {address_text}"))?;
+
+    let len = match len_text.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => parse_len(text)?,
+        None => DEFAULT_READ_LEN,
+    };
+    if len == 0 {
+        return Err("长度必须大于 0".to_string());
+    }
+    if len > MAX_READ_LEN {
+        return Err(format!("长度过大，单次最多读取 {MAX_READ_LEN} 字节"));
+    }
+    Ok((address, len))
+}
+
+fn parse_len(text: &str) -> Result<usize, String> {
+    let value = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16),
+        None => text.parse::<u64>(),
+    }
+    .map_err(|_| format!("长度无效: {text}"))?;
+    usize::try_from(value).map_err(|_| format!("长度过大: {text}"))
+}
+
+/// 导出两层 treemap 为 SVG；分组与排序沿用界面默认值。
+fn write_svg(args: &Args, snapshot: &ProcessSnapshot, path: &Path) {
+    let metric = resolve_metric(args, snapshot);
+    let tree = build_tree(
+        snapshot,
+        TreeOptions {
+            metric,
+            group_by: GroupBy::Category,
+            sort: SortOrder::SizeDesc,
+        },
+    );
+    let svg = tmv_tui::svg::render(
+        &tree,
+        &tmv_tui::svg::SvgOptions {
+            title: format!("tmv · pid {} · 面积 = {}", snapshot.pid, metric.label()),
+            ..Default::default()
+        },
+    );
+    if let Err(err) = std::fs::write(path, svg) {
+        eprintln!("Error: 无法写入 {}: {err}", path.display());
+        std::process::exit(4);
+    }
+    println!(
+        "已导出 {}（{} 个分组，度量 {}）",
+        path.display(),
+        tree.children.len(),
+        metric.label()
+    );
     std::process::exit(0);
 }
 
@@ -421,5 +601,46 @@ fn is_privileged() -> bool {
     #[cfg(not(unix))]
     {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_spec_defaults_to_window() {
+        assert_eq!(
+            parse_read_spec("0x7f0000").unwrap(),
+            (0x7f0000, DEFAULT_READ_LEN)
+        );
+        // 冒号后为空时也用默认长度。
+        assert_eq!(
+            parse_read_spec("0x7f0000:").unwrap(),
+            (0x7f0000, DEFAULT_READ_LEN)
+        );
+    }
+
+    #[test]
+    fn read_spec_accepts_decimal_and_hex_length() {
+        assert_eq!(parse_read_spec("7fff0000:64").unwrap(), (0x7fff_0000, 64));
+        assert_eq!(parse_read_spec("0x1000:0x20").unwrap(), (0x1000, 32));
+    }
+
+    #[test]
+    fn read_spec_rejects_invalid_input() {
+        assert!(parse_read_spec("zz").is_err());
+        assert!(parse_read_spec("1000:0").is_err());
+        assert!(parse_read_spec("1000:abc").is_err());
+        assert!(
+            parse_read_spec(&format!("1000:{}", MAX_READ_LEN + 1)).is_err(),
+            "超过上限应报错"
+        );
+        assert_eq!(
+            parse_read_spec(&format!("1000:{}", MAX_READ_LEN))
+                .unwrap()
+                .1,
+            MAX_READ_LEN
+        );
     }
 }

@@ -30,7 +30,7 @@ jobs:
           tar --transform "s,^,tmv-${version}/," \
               --exclude target --exclude .git --exclude '._*' \
               -czf "dist/tmv-${version}.tar.gz" \
-              Cargo.toml Cargo.lock README.md LICENSE clippy.toml tmv.spec crates
+              Cargo.toml Cargo.lock README.md LICENSE clippy.toml tmv.spec tmv.1 crates
           tar -czf "dist/tmv-${version}-vendor.tar.gz" vendor
           sha256sum dist/*.tar.gz > dist/SHA256SUMS
 

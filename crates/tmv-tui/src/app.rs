@@ -13,6 +13,8 @@ use tmv_core::{
 use tmv_ptrace::{self as ptrace, ThreadInfo, ThreadStack};
 use tmv_symbols::{Resolved, SymbolEngine};
 
+use crate::config::Config;
+
 /// 页图最多采集的样本数，兼顾大映射下的响应速度。
 const MAX_PAGE_SAMPLES: usize = 4096;
 
@@ -55,6 +57,54 @@ pub enum InputTarget {
     Address,
     /// `f`：按路径 / 标签过滤映射。
     Filter,
+    /// `F`：按正则过滤映射。
+    Regex,
+}
+
+/// 生效中的映射过滤条件。
+#[derive(Debug, Clone)]
+pub enum Filter {
+    /// 不区分大小写的子串匹配，关键字已转成小写。
+    Substring(String),
+    /// 不区分大小写的正则匹配。
+    Regex {
+        pattern: String,
+        regex: regex::Regex,
+    },
+}
+
+impl Filter {
+    /// 关键字（小写）或正则是否命中该映射。
+    fn matches(&self, vma: &Vma) -> bool {
+        match self {
+            Filter::Substring(needle) => {
+                vma.label().to_lowercase().contains(needle.as_str())
+                    || vma.pathname.to_lowercase().contains(needle.as_str())
+                    || vma.perms.as_str().contains(needle.as_str())
+            }
+            Filter::Regex { regex, .. } => {
+                regex.is_match(vma.label())
+                    || regex.is_match(&vma.pathname)
+                    || regex.is_match(&vma.perms.as_str())
+            }
+        }
+    }
+
+    /// 状态行显示用的标签：正则用 `/pattern/` 包起来。
+    pub fn label(&self) -> String {
+        match self {
+            Filter::Substring(needle) => needle.clone(),
+            Filter::Regex { pattern, .. } => format!("/{pattern}/"),
+        }
+    }
+
+    /// 原始输入，按 f / F 重新编辑时回填。
+    fn source(&self) -> &str {
+        match self {
+            Filter::Substring(needle) => needle,
+            Filter::Regex { pattern, .. } => pattern,
+        }
+    }
 }
 
 /// 主视图：treemap 或按度量排序的映射列表。
@@ -138,8 +188,8 @@ pub struct App {
     pub input: Option<String>,
     /// 输入框当前是解析地址还是设置过滤。
     pub input_target: InputTarget,
-    /// 生效中的映射过滤关键字（小写比较），None 表示不过滤。
-    pub filter: Option<String>,
+    /// 生效中的映射过滤条件，None 表示不过滤。
+    pub filter: Option<Filter>,
     /// 当前主视图。
     pub view: ViewMode,
     /// 列表视图中的选中行（对应过滤后的映射）。
@@ -296,6 +346,34 @@ impl App {
         }
     }
 
+    /// 应用持久化的界面偏好，并重建树。
+    pub fn apply_config(&mut self, config: &Config) {
+        // 没有 smaps 时度量只能是虚拟大小，配置里的度量不生效。
+        if self.snapshot.has_smaps {
+            self.metric = config.metric;
+        }
+        self.group_by = config.group_by;
+        self.sort = config.sort;
+        self.interval = config.interval;
+        self.auto_refresh = config.auto_refresh && !self.replay;
+        self.show_pages = config.pages;
+        self.diff_enabled = config.diff;
+        self.rebuild();
+    }
+
+    /// 当前界面偏好，退出时写回配置文件。
+    pub fn to_config(&self) -> Config {
+        Config {
+            metric: self.metric,
+            group_by: self.group_by,
+            sort: self.sort,
+            interval: self.interval,
+            auto_refresh: self.auto_refresh,
+            pages: self.show_pages,
+            diff: self.diff_enabled,
+        }
+    }
+
     pub fn focused(&self) -> &MemNode {
         node_at(&self.root, &self.focus).unwrap_or(&self.root)
     }
@@ -438,8 +516,22 @@ impl App {
                 self.input_target = InputTarget::Address;
             }
             KeyCode::Char('f') => {
-                self.input = Some(self.filter.clone().unwrap_or_default());
+                self.input = Some(
+                    self.filter
+                        .as_ref()
+                        .map(|filter| filter.source().to_string())
+                        .unwrap_or_default(),
+                );
                 self.input_target = InputTarget::Filter;
+            }
+            KeyCode::Char('F') => {
+                self.input = Some(
+                    self.filter
+                        .as_ref()
+                        .map(|filter| filter.source().to_string())
+                        .unwrap_or_default(),
+                );
+                self.input_target = InputTarget::Regex;
             }
             KeyCode::Char('m') => self.cycle_metric(),
             KeyCode::Char('p') => {
@@ -586,6 +678,7 @@ impl App {
                 match self.input_target {
                     InputTarget::Address => self.lookup_address(&text),
                     InputTarget::Filter => self.apply_filter(&text),
+                    InputTarget::Regex => self.apply_regex_filter(&text),
                 }
             }
             KeyCode::Backspace => {
@@ -596,7 +689,7 @@ impl App {
             KeyCode::Char(character) => {
                 // 过滤关键字可以是任意可打印字符；地址输入只接受十六进制。
                 let accept = match self.input_target {
-                    InputTarget::Filter => !character.is_control(),
+                    InputTarget::Filter | InputTarget::Regex => !character.is_control(),
                     InputTarget::Address => {
                         character.is_ascii_hexdigit() || character == 'x' || character == 'X'
                     }
@@ -611,38 +704,69 @@ impl App {
         }
     }
 
-    /// 应用映射过滤条件；空字符串表示清除。
+    /// 应用子串过滤；空字符串表示清除。
     pub fn apply_filter(&mut self, text: &str) {
         let trimmed = text.trim();
-        self.filter = (!trimmed.is_empty()).then(|| trimmed.to_lowercase());
+        self.filter = (!trimmed.is_empty()).then(|| Filter::Substring(trimmed.to_lowercase()));
+        self.reset_after_filter();
+        self.status = match &self.filter {
+            Some(filter) => {
+                let (matched, total) = self.filter_counts();
+                format!("过滤 “{}”：{matched} / {total} 个映射", filter.label())
+            }
+            None => format!("已清除过滤，共 {} 个映射", self.snapshot.vmas.len()),
+        };
+    }
+
+    /// 应用正则过滤；正则无效时保留原条件并提示。
+    pub fn apply_regex_filter(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            self.apply_filter("");
+            return;
+        }
+        let regex = match regex::RegexBuilder::new(trimmed)
+            .case_insensitive(true)
+            .build()
+        {
+            Ok(regex) => regex,
+            Err(err) => {
+                self.status = format!("正则无效: {err}");
+                return;
+            }
+        };
+        self.filter = Some(Filter::Regex {
+            pattern: trimmed.to_string(),
+            regex,
+        });
+        self.reset_after_filter();
+        let (matched, total) = self.filter_counts();
+        self.status = format!("正则 “/{trimmed}/”：{matched} / {total} 个映射");
+    }
+
+    /// 过滤条件变化后回到根层并重建树。
+    fn reset_after_filter(&mut self) {
         self.focus.clear();
         self.selected = 0;
         self.list_index = 0;
         self.last_layout.clear();
         self.rebuild();
-        self.status = match &self.filter {
-            Some(filter) => {
-                let (matched, total) = self.filter_counts();
-                format!("过滤 “{filter}”：{matched} / {total} 个映射")
-            }
-            None => format!("已清除过滤，共 {} 个映射", self.snapshot.vmas.len()),
-        };
     }
 
     /// 过滤条件与命中数量，供状态行显示。
     pub fn filter_summary(&self) -> Option<(String, usize, usize)> {
         let filter = self.filter.as_ref()?;
         let (matched, total) = self.filter_counts();
-        Some((filter.clone(), matched, total))
+        Some((filter.label(), matched, total))
     }
 
     fn filter_counts(&self) -> (usize, usize) {
         let matched = match &self.filter {
-            Some(needle) => self
+            Some(filter) => self
                 .snapshot
                 .vmas
                 .iter()
-                .filter(|vma| vma_matches(vma, needle))
+                .filter(|vma| filter.matches(vma))
                 .count(),
             None => self.snapshot.vmas.len(),
         };
@@ -651,22 +775,22 @@ impl App {
 
     /// 应用过滤后的快照；无过滤时直接复用当前快照。
     fn visible_snapshot(&self) -> ProcessSnapshot {
-        let Some(needle) = &self.filter else {
+        let Some(filter) = &self.filter else {
             return self.snapshot.clone();
         };
         let mut snapshot = self.snapshot.clone();
-        snapshot.vmas.retain(|vma| vma_matches(vma, needle));
+        snapshot.vmas.retain(|vma| filter.matches(vma));
         snapshot
     }
 
     /// 过滤后按当前度量降序排列的映射，列表视图直接使用。
     pub fn visible_vmas(&self) -> Vec<&Vma> {
         let mut vmas: Vec<&Vma> = match &self.filter {
-            Some(needle) => self
+            Some(filter) => self
                 .snapshot
                 .vmas
                 .iter()
-                .filter(|vma| vma_matches(vma, needle))
+                .filter(|vma| filter.matches(vma))
                 .collect(),
             None => self.snapshot.vmas.iter().collect(),
         };
@@ -1419,13 +1543,6 @@ fn node_at<'a>(root: &'a MemNode, path: &[usize]) -> Option<&'a MemNode> {
     Some(node)
 }
 
-/// 过滤关键字（小写）是否命中该映射。
-fn vma_matches(vma: &Vma, needle: &str) -> bool {
-    vma.label().to_lowercase().contains(needle)
-        || vma.pathname.to_lowercase().contains(needle)
-        || vma.perms.as_str().contains(needle)
-}
-
 fn center(rect: Rect) -> (f64, f64) {
     (
         rect.x as f64 + rect.width as f64 / 2.0,
@@ -1686,7 +1803,63 @@ mod tests {
 
         press(&mut app, KeyCode::Enter);
         assert!(app.input.is_none());
-        assert_eq!(app.filter.as_deref(), Some("lib"));
+        assert_eq!(
+            app.filter.as_ref().map(|filter| filter.source()),
+            Some("lib")
+        );
+    }
+
+    #[test]
+    fn regex_filter_matches_case_insensitively() {
+        let mut app = App::new(demo::snapshot(), None, true, false);
+        let total = app.snapshot.vmas.len();
+
+        app.apply_regex_filter(r"^/usr/lib.*\.so");
+
+        let (label, matched, count) = app.filter_summary().expect("正则过滤已生效");
+        assert_eq!(label, r"/^/usr/lib.*\.so/");
+        assert!(matched > 0 && matched < total, "命中 {matched} / {total}");
+        assert_eq!(count, total);
+        assert!(app
+            .visible_vmas()
+            .iter()
+            .all(|vma| vma.pathname.starts_with("/usr/lib") && vma.pathname.contains(".so")));
+
+        // 正则区分不了大小写时也应命中：大写 LIB。
+        app.apply_regex_filter("LIB");
+        assert!(app.filter_counts().0 > 0);
+    }
+
+    #[test]
+    fn invalid_regex_keeps_previous_filter() {
+        let mut app = App::new(demo::snapshot(), None, true, false);
+        app.apply_filter("libc");
+        let before = app.filter_summary().expect("已生效");
+
+        app.apply_regex_filter("[unclosed");
+        assert!(app.status.contains("正则无效"), "实际: {}", app.status);
+        let after = app.filter_summary().expect("原过滤应保留");
+        assert_eq!(before, after, "无效正则不应改动现有过滤");
+
+        app.apply_regex_filter("");
+        assert!(app.filter.is_none(), "空正则等同于清除过滤");
+    }
+
+    #[test]
+    fn regex_input_accepts_metacharacters() {
+        let mut app = App::new(demo::snapshot(), None, true, false);
+        press(&mut app, KeyCode::Char('F'));
+        assert_eq!(app.input_target, InputTarget::Regex);
+
+        for character in "^/usr/.*\\.so$".chars() {
+            press(&mut app, KeyCode::Char(character));
+        }
+        assert_eq!(app.input.as_deref(), Some("^/usr/.*\\.so$"));
+
+        press(&mut app, KeyCode::Enter);
+        assert!(app.input.is_none());
+        assert!(app.status.contains("正则"), "实际: {}", app.status);
+        assert!(app.filter.is_some());
     }
 
     #[test]
@@ -1841,6 +2014,42 @@ mod tests {
             "实际: {:?}",
             app.page_error
         );
+    }
+
+    #[test]
+    fn config_round_trips_through_app() {
+        let mut app = App::new(demo::snapshot(), None, true, false);
+        let config = Config {
+            metric: Metric::Rss,
+            group_by: GroupBy::Map,
+            sort: SortOrder::Address,
+            interval: Duration::from_secs(30),
+            auto_refresh: true,
+            pages: false,
+            diff: false,
+        };
+
+        app.apply_config(&config);
+
+        assert_eq!(app.metric, Metric::Rss);
+        assert_eq!(app.group_by, GroupBy::Map);
+        assert!(app.auto_refresh);
+        assert!(!app.show_pages);
+        assert_eq!(app.to_config(), config, "退出时应原样写回配置");
+    }
+
+    #[test]
+    fn config_metric_falls_back_without_smaps() {
+        let mut snapshot = demo::snapshot();
+        snapshot.has_smaps = false;
+        let mut app = App::new(snapshot, None, true, false);
+
+        app.apply_config(&Config {
+            metric: Metric::Pss,
+            ..Config::default()
+        });
+
+        assert_eq!(app.metric, Metric::Virtual, "无 smaps 时只能是虚拟大小");
     }
 
     #[test]

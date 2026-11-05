@@ -45,6 +45,12 @@ pub fn squarify(weights: &[f64], area: Rect) -> Vec<Rect> {
         h: area.height as f64,
     };
 
+    // 后缀和：外层循环每轮都要判断「剩下的项还放得下吗」，逐次求和会退化成 O(n²)。
+    let mut suffix = vec![0.0; items.len() + 1];
+    for (index, (_, item_area)) in items.iter().enumerate().rev() {
+        suffix[index] = suffix[index + 1] + item_area;
+    }
+
     let mut start = 0;
     while start < items.len() {
         // 行是沿较长边铺开的，长宽比也必须用这条边的长度来计算。
@@ -56,7 +62,7 @@ pub fn squarify(weights: &[f64], area: Rect) -> Vec<Rect> {
 
         // 剩余项总高度不足 1 格时，说明它们只能共用最后一条带，整体打包，
         // 否则会被逐个取整成 1 行而把更小的项挤没。
-        let remaining: f64 = items[start..].iter().map(|(_, area)| *area).sum();
+        let remaining = suffix[start];
         let remaining_thickness = if horizontal {
             remaining / free.w
         } else {
@@ -67,25 +73,36 @@ pub fn squarify(weights: &[f64], area: Rect) -> Vec<Rect> {
             break;
         }
 
+        // 行内累加和与小/大值随候选一起更新，避免每加一块就重扫整行。
+        let first_area = items[start].1;
+        let mut row_sum = first_area;
+        let mut row_min = first_area;
+        let mut row_max = first_area;
+        let mut best = ratio(row_sum, row_min, row_max, side);
         let mut end = start + 1;
-        let mut best = worst_ratio(&items[start..end], side);
+        let limit = if horizontal { free.h } else { free.w };
         while end < items.len() {
-            let candidate = worst_ratio(&items[start..end + 1], side);
+            let item_area = items[end].1;
+            let next_sum = row_sum + item_area;
+            let next_min = row_min.min(item_area);
+            let next_max = row_max.max(item_area);
+            let candidate = ratio(next_sum, next_min, next_max, side);
             if candidate > best {
                 break;
             }
             // 新行必须装得进剩余空间，否则先铺的行会把后面的行挤掉。
-            let sum: f64 = items[start..end + 1].iter().map(|(_, area)| *area).sum();
             let thickness = if horizontal {
-                sum / free.w
+                next_sum / free.w
             } else {
-                sum / free.h
+                next_sum / free.h
             };
-            let limit = if horizontal { free.h } else { free.w };
             if thickness > limit {
                 break;
             }
             best = candidate;
+            row_sum = next_sum;
+            row_min = next_min;
+            row_max = next_max;
             end += 1;
         }
 
@@ -104,17 +121,11 @@ struct F64Rect {
     h: f64,
 }
 
-/// 当前行/列的最差长宽比，值越小越接近正方形。
-fn worst_ratio(row: &[(usize, f64)], side: f64) -> f64 {
-    if row.is_empty() || side <= 0.0 {
+/// 给定一行的面积和与极值，计算该行最差长宽比，值越小越接近正方形。
+fn ratio(sum: f64, min: f64, max: f64, side: f64) -> f64 {
+    if side <= 0.0 || sum <= 0.0 || min <= 0.0 {
         return f64::MAX;
     }
-    let sum: f64 = row.iter().map(|(_, area)| *area).sum();
-    if sum <= 0.0 {
-        return f64::MAX;
-    }
-    let max = row.iter().map(|(_, area)| *area).fold(0.0_f64, f64::max);
-    let min = row.iter().map(|(_, area)| *area).fold(f64::MAX, f64::min);
     let sum_sq = sum * sum;
     let side_sq = side * side;
     (side_sq * max / sum_sq).max(sum_sq / (side_sq * min))
@@ -277,6 +288,107 @@ mod tests {
                 .iter()
                 .filter(|rect| cells(**rect) == 0)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// 大进程基准：10 万 VMA 的建树与布局耗时。
+    ///
+    /// 手动运行以对比优化前后的量级：
+    /// `cargo test --release -p tmv-tui -- --ignored --nocapture large_snapshot`
+    #[test]
+    #[ignore = "性能基准，需手动在 release 下运行"]
+    fn large_snapshot_build_and_layout() {
+        use std::time::Instant;
+
+        use tmv_core::{
+            build_tree, demo, GroupBy, Metric, Perms, SmapsStats, SortOrder, TreeOptions, Vma,
+        };
+
+        const COUNT: usize = 100_000;
+        const PAGE: u64 = 4096;
+        let mut vmas = Vec::with_capacity(COUNT);
+        for index in 0..COUNT {
+            let start = 0x1000 + index as u64 * PAGE * 4;
+            let size = PAGE * (1 + (index % 16) as u64);
+            let pathname = match index % 3 {
+                0 => format!("/usr/lib/aarch64-linux-gnu/lib{}.so", index % 512),
+                1 => String::new(),
+                _ => format!("[anon:{index}]"),
+            };
+            vmas.push(Vma {
+                start,
+                end: start + size,
+                perms: Perms {
+                    read: true,
+                    write: index % 2 == 0,
+                    exec: index % 3 == 0,
+                    shared: index % 2 == 1,
+                },
+                offset: 0,
+                dev: "08:01".to_string(),
+                inode: index as u64,
+                pathname,
+                stats: Some(SmapsStats {
+                    size,
+                    rss: size / 2,
+                    pss: size / 2,
+                    ..SmapsStats::default()
+                }),
+            });
+        }
+        let mut snapshot = demo::snapshot();
+        snapshot.vmas = vmas;
+        snapshot.has_smaps = true;
+
+        let start = Instant::now();
+        let grouped = build_tree(
+            &snapshot,
+            TreeOptions {
+                metric: Metric::Pss,
+                group_by: GroupBy::Category,
+                sort: SortOrder::SizeDesc,
+            },
+        );
+        let build = start.elapsed();
+
+        let start = Instant::now();
+        let flat = build_tree(
+            &snapshot,
+            TreeOptions {
+                metric: Metric::Pss,
+                group_by: GroupBy::Map,
+                sort: SortOrder::SizeDesc,
+            },
+        );
+        let build_flat = start.elapsed();
+
+        // 典型 200x60 终端区域下铺 10 万块。
+        let weights: Vec<f64> = flat
+            .children
+            .iter()
+            .map(|child| child.bytes as f64)
+            .collect();
+        let start = Instant::now();
+        let rects = squarify(&weights, area(200, 60));
+        let layout = start.elapsed();
+
+        println!(
+            "10 万 VMA：类别建树 {build:?}，单层建树 {build_flat:?}，布局 {layout:?}，分组 {}",
+            grouped.children.len()
+        );
+
+        assert_eq!(rects.len(), COUNT);
+        assert!(
+            build < std::time::Duration::from_secs(10),
+            "类别建树耗时异常: {build:?}"
+        );
+        assert!(
+            build_flat < std::time::Duration::from_secs(10),
+            "单层建树耗时异常: {build_flat:?}"
+        );
+        assert!(
+            layout < std::time::Duration::from_secs(2),
+            "布局耗时异常: {layout:?}"
         );
     }
 }

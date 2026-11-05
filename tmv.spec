@@ -6,7 +6,7 @@
 #   cargo vendor vendor
 #   tar --transform 's,^,tmv-0.1.0/,' --exclude target --exclude .git \
 #       --exclude '._*' -czf tmv-0.1.0.tar.gz \
-#       Cargo.toml Cargo.lock README.md LICENSE clippy.toml tmv.spec crates
+#       Cargo.toml Cargo.lock README.md LICENSE clippy.toml tmv.spec tmv.1 crates
 #   tar -czf tmv-0.1.0-vendor.tar.gz vendor
 # 然后 rpmbuild -ba tmv.spec（两个 tar 包需在 ~/rpmbuild/SOURCES）。
 #
@@ -62,6 +62,7 @@ cargo build --release --offline --locked --frozen
 
 %install
 install -Dpm0755 target/release/%{name} %{buildroot}%{_bindir}/%{name}
+install -Dpm0644 tmv.1 %{buildroot}%{_mandir}/man1/tmv.1
 # 不生成 debuginfo 包（见文件头 debug_package），这里显式剥离调试符号。
 %{__strip} --strip-unneeded %{buildroot}%{_bindir}/%{name}
 
@@ -71,6 +72,7 @@ cargo test --release --offline --locked --frozen
 
 %files
 %{_bindir}/%{name}
+%{_mandir}/man1/tmv.1*
 %doc README.md
 %license LICENSE
 

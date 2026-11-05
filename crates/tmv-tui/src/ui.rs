@@ -806,6 +806,10 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             format!(" 过滤(路径/权限): {input}▏  Enter 应用  Esc 取消"),
             Color::Cyan,
         ),
+        Some(input) if app.input_target == InputTarget::Regex => (
+            format!(" 正则过滤(路径/标签): {input}▏  Enter 应用  Esc 取消"),
+            Color::Magenta,
+        ),
         Some(input) => (
             format!(" 地址(十六进制): {input}▏  Enter 解析  Esc 取消"),
             Color::Yellow,
@@ -828,7 +832,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             Color::DarkGray,
         ),
         None => (
-            " ←→↑↓ 选择  Enter 下钻  Esc 返回  v 视图  / 地址  f 过滤  m 指标  g 分组  o 排序  p 页图  t 栈  a 账务  x 内存  s 设置  ? 帮助  r 刷新  rr 定时  q 退出"
+            " ←→↑↓ 选择  Enter 下钻  Esc 返回  v 视图  / 地址  f 过滤  F 正则  m 指标  g 分组  o 排序  p 页图  t 栈  a 账务  x 内存  s 设置  ? 帮助  r 刷新  rr 定时  q 退出"
                 .to_string(),
             Color::DarkGray,
         ),
@@ -837,11 +841,12 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// 帮助面板里的按键说明，按「分类 / 按键 / 说明」预排版，避免中英混排错位。
-const HELP_LINES: [&str; 13] = [
+const HELP_LINES: [&str; 14] = [
     " 移动   ←→↑↓ / hjkl    选择相邻块；列表视图逐行移动",
     " 导航   Enter / Esc     下钻 / 返回；列表视图切回 treemap",
     " 视图   v               treemap ↔ 映射列表",
     " 过滤   f               路径 / 标签 / 权限，Enter 应用",
+    " 过滤   F               同一范围的正则过滤，Enter 应用",
     " 地址   /               解析十六进制地址并跳转",
     " 度量   m               PSS / RSS / 虚拟 / 独占 / 共享 / Swap",
     " 分组   g               类别 / 文件 / 映射",

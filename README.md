@@ -62,7 +62,8 @@
 - `v` 在 treemap 与「映射列表」之间切换，列表默认按当前度量降序，`o` 可切换为地址升序，展示地址区间 / 虚拟 / RSS / PSS / Swap / 权限 / 路径
 - 列表选中项与 treemap 焦点、右侧详情、页图联动，`Enter` 回到 treemap
 - `f` 输入过滤关键字，匹配路径、标签（如 `[heap]`）或权限；`Enter` 应用，空串清除
-- 过滤同时作用于 treemap、列表与 `/` 地址跳转，状态行显示「过滤:关键字 命中/总数」
+- `F` 用正则过滤（不区分大小写），语法错误时保留原过滤条件并在状态行提示
+- 过滤同时作用于 treemap、列表与 `/` 地址跳转，状态行显示「过滤:关键字 命中/总数」，正则显示为 `/pattern/`
 - 被过滤掉的地址用 `/` 查询时会提示「不在当前过滤结果中」
 - `?` 打开帮助面板，集中列出全部按键，任意键关闭
 
@@ -87,6 +88,8 @@
 - `--top N`：控制报告与差值列表的条目数
 - `--metric <virtual|rss|pss|private|shared|swap>`：指定面积与差值使用的度量
 - `--lookup <ADDR>`：解析十六进制地址并打印模块 / 符号 / 源码行，适合脚本与现场排查
+- `--read <ADDR[:LEN]>`：读取内存并按 `xxd` 风格打印（默认 256 字节，上限 64 KiB），不进入 TUI
+- `--svg <FILE>`：把两层 treemap 导出为 SVG（分组 → 叶子，带配色与标签），适合放进文档或工单
 - `--stack`：回溯主线程调用栈并逐帧打印模块 / 符号 / 源码行，标题标出所用算法
 - 退出码区分失败原因，便于脚本判断（见下表）
 
@@ -105,6 +108,8 @@
 - arm64 几何抽象：页大小 4K/16K/64K、VA 位宽 39/48/52、PMD 大页尺寸、TBI/MTE tag 剥离
 - 双架构：aarch64 与 x86_64 均支持寄存器读取、CFI / 帧指针回溯与 TLS
 - `--demo` 合成数据，可在 macOS 上预览全部界面（非 Linux 不读取 `/proc`）
+- 界面偏好持久化到 `~/.config/tmv/config.toml`，退出自动写回，`--no-config` 可关闭
+- 布局对块数是线性的：10 万 VMA 建树约 28 ms，200×60 区域铺满约 1 ms（release）
 - Release 提供 aarch64 / x86_64 的 musl 静态二进制，解包即可在 openEuler 等发行版运行
 - `cargo test --workspace` 覆盖几何、解析、treemap 布局、diff、符号与 UI 渲染
 
@@ -179,8 +184,11 @@ chmod +x /tmp/tmv
 | `./tmv <pid> --baseline base.json --report` | 与基线对比后输出报告 |
 | `./tmv <pid> --report --metric rss --top 20` | 指定度量与条目数 |
 | `./tmv <pid> --lookup 0xffffa5d1a748` | 解析单个地址后退出 |
+| `./tmv <pid> --read 0xffffa5d1a748:128` | 读取 128 字节并按 `xxd` 风格打印 |
+| `./tmv <pid> --svg mem.svg` | 导出 treemap 为 SVG 后退出 |
 | `./tmv <pid> --stack` | 回溯主线程调用栈后退出 |
 | `./tmv --demo` | 合成数据预览，可在 macOS 直接运行 |
+| `./tmv <pid> --no-config` | 不读写 `~/.config/tmv/config.toml` |
 | `./tmv --help` | 参数说明 |
 
 PID 不存在时输出：
@@ -209,6 +217,7 @@ Error: 进程 2000000000 不存在
 | `Home` / `End` | 跳到同级第一个 / 最后一个 |
 | `v` | 切换主视图：treemap ↔ 映射列表（按当前度量降序） |
 | `f` | 输入过滤关键字（匹配路径 / 标签 / 权限），`Enter` 应用，`Esc` 取消 |
+| `F` | 输入正则过滤（不区分大小写），`Enter` 应用，语法错误时保留原条件 |
 | `m` | 切换度量（PSS → RSS → 虚拟 → 独占 → 共享 → Swap） |
 | `g` | 切换分组（类别 → 文件 → 映射） |
 | `o` | 切换排序（大小 ↔ 地址），切换后回到根层 |
@@ -227,6 +236,27 @@ Error: 进程 2000000000 不存在
 | `q` / `Ctrl-C` | 退出 |
 
 设置界面内：`↑↓` 选择，`←→` / `+` / `-` 调整，`Enter` / `Space` 切换，`Esc` / `s` 关闭。
+
+## 配置持久化
+
+退出 TUI 时把界面偏好写到 `$XDG_CONFIG_HOME/tmv/config.toml`（默认 `~/.config/tmv/config.toml`），下次启动自动沿用：
+
+```toml
+# metric: virtual | rss | pss | private | shared | swap
+metric = "pss"
+# group: category | file | map
+group = "category"
+# sort: size | address
+sort = "size"
+interval = 5
+auto_refresh = false
+pages = true
+diff = true
+```
+
+- 命令行 `--metric` / `--interval` 优先于配置文件
+- `--no-config` 完全不读写配置；用 `TMV_CONFIG=/path/to/config.toml` 可换到别的位置
+- 解析是宽松的：未知键和非法值会被忽略并沿用默认值，手改出错不会影响启动
 
 ## 典型工作流
 
@@ -320,10 +350,11 @@ Error: 进程 2000000000 不存在
 - 读取进程信息依赖 Linux `/proc`；macOS 等平台只能用 `--demo`，直接传 PID 会以退出码 4 提示平台不支持
 - `--replay` 回放时不能重新采样、看页图、回溯线程栈或采集账务，界面会提示原因；`--report` 会跳过账务段
 - `x` 内存查看器一次读取 512 字节，依赖 ptrace 权限；跨过未映射边界时会短读
+- `--read` 单次最多 64 KiB，同样是短读语义；回放模式没有内存内容，会直接报错
 - 栈回溯的 CFI 只覆盖「CFA = SP/FP + 偏移」且 RA/FP 保存在栈上的规则；其它规则回退到帧指针链
 - 页级变化只比较同一区间的连续两次扫描，切换选中项或区间变化时不显示
 - 进程退出检测用 `kill(pid, 0)`，只判断 pid 是否存在；pid 被复用后不会自动切换到新进程
-- 过滤是大小写不敏感的子串匹配，不支持正则或通配符
+- 过滤默认是大小写不敏感的子串匹配；`F` 可用正则（同样不区分大小写），无效正则会保留原条件
 - treemap 面积使用当前值，未取前后快照的较大者
 - 栈回溯优先 DWARF CFI，规则不支持（表达式 / 值偏移）时整条链回退帧指针
 - MTE tag 只在最高字节上剥离，未做内存标签校验
@@ -338,6 +369,7 @@ Error: 进程 2000000000 不存在
 tmv/
 ├── Cargo.toml                  # workspace
 ├── tmv.spec                    # 可选的自建 RPM 描述
+├── tmv.1                       # man page（spec 安装到 man1）
 ├── .github/workflows/          # CI 与 Release 自动化
 └── crates/
     ├── tmv-core/           # 数据模型与 /proc 采集
@@ -353,7 +385,7 @@ tmv/
     │   └── demo.rs             # 合成数据
     ├── tmv-symbols/        # ELF 符号、DWARF 行号 / CFI、perf JIT map
     ├── tmv-ptrace/         # 线程枚举、寄存器、DWARF / FP 回溯、TLS
-    ├── tmv-tui/            # 状态机、treemap 布局、界面渲染
+    ├── tmv-tui/            # 状态机、treemap 布局、界面渲染、config.rs / svg.rs
     └── tmv-cli/            # 参数解析、终端初始化、事件循环
 ```
 
@@ -363,6 +395,9 @@ tmv/
 cargo test --workspace                 # 全部测试
 cargo run -- --demo                    # macOS 上预览界面
 cargo fmt --all                        # 格式化
+
+# 10 万 VMA 的性能基准（默认被 ignore，需手动跑）
+cargo test --release -p tmv-tui -- --ignored --nocapture large_snapshot
 ```
 
 ## 发布与分发（GitHub Releases）
@@ -408,7 +443,7 @@ cargo vendor vendor
 tar --transform 's,^,tmv-0.1.0/,' \
     --exclude target --exclude .git --exclude '._*' \
     -czf tmv-0.1.0.tar.gz \
-    Cargo.toml Cargo.lock README.md LICENSE clippy.toml tmv.spec crates
+    Cargo.toml Cargo.lock README.md LICENSE clippy.toml tmv.spec tmv.1 crates
 tar -czf tmv-0.1.0-vendor.tar.gz vendor
 
 cp tmv-0.1.0*.tar.gz ~/rpmbuild/SOURCES/
@@ -418,6 +453,7 @@ sudo dnf install -y ~/rpmbuild/RPMS/$(uname -m)/tmv-0.1.0-1.*.rpm
 
 - spec 里 `Source0` / `Source1` 指向 GitHub Release 附件；本地构建时把上面两个包放进 `SOURCES/` 即可，不会联网
 - `%check` 会执行 `cargo test --release --offline --locked`，不想跑测试可加 `--nocheck`
+- 安装后会一并装好 `tmv.1`，可用 `man tmv` 查看完整手册
 - 不想用 RPM 时，直接用 Release 里的静态二进制即可
 
 ### 与 openEuler 24.03 的 Rust 版本兼容

@@ -30,6 +30,8 @@ gimli = "0.32"
 libc = "0.2"
 object = { version = "0.37", default-features = false, features = ["read", "std", "elf", "macho"] }
 ratatui = "0.29"
+# 正则过滤映射用；regex 1.x 的 MSRV 远低于 1.82，不会影响 openEuler。
+regex = "1"
 rustc-demangle = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
