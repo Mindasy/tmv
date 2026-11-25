@@ -50,11 +50,13 @@ EOF
 
 %build
 export CARGO_HOME="%{_builddir}/%{name}-%{version}/.cargo-home"
+# Refresh workspace inputs restored from the source archive when reusing target.
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then find crates -type f -exec touch {} +; fi
 cargo build --release --offline --locked --frozen
 make -C tools/heaptrace CFLAGS="%{optflags} -fno-omit-frame-pointer"
 
 %install
-install -Dpm0755 target/release/%{name} %{buildroot}%{_bindir}/%{name}
+install -Dpm0755 "${CARGO_TARGET_DIR:-target}"/release/%{name} %{buildroot}%{_bindir}/%{name}
 install -Dpm0755 tools/heaptrace/libtmvtrace.so %{buildroot}%{_libdir}/tmv/libtmvtrace.so
 install -Dpm0644 tools/heaptrace/demo/memory_demo.c %{buildroot}%{_docdir}/tmv/examples/memory_demo.c
 install -Dpm0644 tmv.1 %{buildroot}%{_mandir}/man1/tmv.1

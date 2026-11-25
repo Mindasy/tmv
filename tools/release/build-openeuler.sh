@@ -12,7 +12,12 @@ root=$PWD
 dist="$root/dist/$arch"
 mkdir -p "$dist"
 rm -f "$dist/ACCEPTANCE.txt" "$dist/UPGRADE.txt"
-work=$(mktemp -d "${TMV_BUILD_ROOT:-/var/tmp}/tmv-package.XXXXXX")
+if [[ -n "${TMV_RPM_WORKDIR:-}" ]]; then
+    work=$TMV_RPM_WORKDIR
+    mkdir "$work" # CI uses a fresh container with a stable source path.
+else
+    work=$(mktemp -d "${TMV_BUILD_ROOT:-/var/tmp}/tmv-package.XXXXXX")
+fi
 mkdir -p "$work"/{SOURCES,SPECS,BUILD,BUILDROOT,RPMS,SRPMS}
 # Explicit clean source tree: never package old binaries, recordings or caches.
 python3 - "$root" "$work/SOURCES/tmv-$version.tar.gz" "$version" <<'PY'

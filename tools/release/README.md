@@ -60,14 +60,8 @@ RPM Source0/Source1 使用完整 tag 定位源码包。非法 tag 在打包前�
 - [openEuler 官方容器镜像说明](https://hub.docker.com/r/openeuler/openeuler/)
 - [GitHub 托管 runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 
-## 下载阶段的进度与超时
+## 发布构建缓存
 
-Actions 将镜像拉取、OS 元数据、update 元数据、依赖安装、构建和安装验收拆成独立步骤。
-OS 元数据输出完成不代表已开始编译：之后还有 update 元数据下载/解析和依赖安装。
-两个仓库均为必需，不会因下载失败而静默跳过 update。
+默认分支在镜像配方、依赖锁或发布工作流变化时预热缓存。每种架构保存独立的 openEuler 工具链镜像。tag 命中时直接加载镜像，缓存过期时自动重建。冷启动使用 OS 仓库解析基础依赖，按完整版本下载Rust 1.82 及 LLVM 18 运行库 RPM 并启用签名校验，省去 update 全库索引下载。刷新工具链时修改镜像配方。
 
-DNF 配置为 30 秒连接/低速检测窗口、10 KiB/s 最低速度、重试上限 2、最多 8 路下载；
-保留 RPM 缓存并关闭弱依赖安装。网络参数不限制本地元数据解析时间，所以另设步骤总超时：
-镜像 5 分钟、OS 元数据 4 分钟、update 元数据 8 分钟、安装 10 分钟。
-下载缓存按架构隔离，失败时尽力保存 dnf 日志到 Actions artifact 的 dependency-logs。
-修改工作流不会影响已经启动的运行；重跑旧 tag 也仍使用旧提交的工作流，需新提交触发。
+vendor 压缩包按改写版本前的 Cargo.lock 复用。编译目录按架构、镜像配方、依赖锁和构建配置隔离。每次打包刷新工作区源码时间戳并运行完整验收。Actions 的步骤耗时可用于比较冷启动与缓存命中。手动从 main 运行 Release 可以重新预热并验收，推 tag 才发布。

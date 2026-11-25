@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     tags: ["v*"]
+    branches: [main]
+    paths: [tools/release/Dockerfile, tools/release/prepare-deps.sh, Cargo.lock, .github/workflows/release.yml]
   workflow_dispatch:
 
 permissions:
@@ -22,6 +24,46 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      - name: Restore openEuler toolchain image
+        id: builder
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/builder.tar
+          key: builder-v1-${{ matrix.arch }}-${{ hashFiles('tools/release/Dockerfile', 'tools/release/prepare-deps.sh') }}
+      - name: Prepare toolchain image
+        run: |
+          if [[ -f "$RUNNER_TEMP/builder.tar" ]]; then
+            docker load -i "$RUNNER_TEMP/builder.tar"
+          else
+            docker build -t tmv-builder -f tools/release/Dockerfile tools/release
+            docker save -o "$RUNNER_TEMP/builder.tar" tmv-builder
+          fi
+      - uses: actions/cache/save@v4
+        if: steps.builder.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/builder.tar
+          key: ${{ steps.builder.outputs.cache-primary-key }}
+      - name: Restore Cargo vendor archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tmv-cache/vendor.tar.gz
+          key: tmv-vendor-v1-${{ hashFiles('Cargo.lock') }}
+      - name: Restore compiled dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tmv-cache/target
+          key: tmv-target-v1-${{ matrix.arch }}-${{ steps.builder.outputs.cache-primary-key }}-${{ hashFiles('Cargo.lock', 'tmv.spec', 'Cargo.toml', 'crates/*/Cargo.toml') }}
+      - name: Start builder and prepare vendor archive
+        run: |
+          mkdir -p "$RUNNER_TEMP/tmv-cache/target" "dist/${{ matrix.arch }}"
+          docker run -d --name tmv-build --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+            -v "$PWD:/src" -w /src -v "$RUNNER_TEMP/tmv-cache:/cache" \
+            -e TMV_RPM_WORKDIR=/var/tmp/tmv-package -e TMV_VENDOR_ARCHIVE=/cache/vendor.tar.gz -e CARGO_TARGET_DIR=/cache/target \
+            tmv-builder sleep infinity
+          docker image inspect tmv-builder --format '{{.Id}}' > dist/${{ matrix.arch }}/CONTAINER-IMAGE.txt
+          if [[ ! -f "$RUNNER_TEMP/tmv-cache/vendor.tar.gz" ]]; then
+            docker exec tmv-build bash -ec 'cargo vendor --locked /tmp/vendor && tar czf /cache/vendor.tar.gz -C /tmp vendor'
+          fi
       - name: Set package version from tag
         shell: bash
         run: |
@@ -29,35 +71,6 @@ jobs:
             python3 tools/release/set-version.py "$GITHUB_REF_NAME"
           fi
           test "$(uname -m)" = '${{ matrix.arch }}'
-      - name: Restore DNF download cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/tmv-dnf-cache
-          key: oe2403-dnf-${{ matrix.arch }}-${{ hashFiles('tmv.spec', 'tools/release/prepare-deps.sh') }}
-          restore-keys: |
-            oe2403-dnf-${{ matrix.arch }}-
-      - name: Pull and start openEuler container
-        timeout-minutes: 5
-        shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/tmv-dnf-cache" "dist/${{ matrix.arch }}"
-          docker pull openeuler/openeuler:24.03-lts
-          docker run -d --name tmv-build --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
-            -v "$PWD:/src" -w /src \
-            -v "$RUNNER_TEMP/tmv-dnf-cache:/var/cache/dnf" \
-            openeuler/openeuler:24.03-lts sleep infinity
-          docker exec tmv-build bash -lc 'sed -i "s|http://repo.openeuler.org|https://repo.openeuler.org|g" /etc/yum.repos.d/*.repo'
-          docker image inspect openeuler/openeuler:24.03-lts --format '{{json .RepoDigests}}' \
-            > dist/${{ matrix.arch }}/CONTAINER-IMAGE.txt
-      - name: Download OS repository metadata
-        timeout-minutes: 4
-        run: docker exec tmv-build bash tools/release/prepare-deps.sh os
-      - name: Download update repository metadata
-        timeout-minutes: 8
-        run: docker exec tmv-build bash tools/release/prepare-deps.sh update
-      - name: Install build and test dependencies
-        timeout-minutes: 10
-        run: docker exec tmv-build bash tools/release/prepare-deps.sh install
       - name: Build RPM and portable archive
         timeout-minutes: 20
         run: docker exec tmv-build bash tools/release/build-openeuler.sh
@@ -76,6 +89,7 @@ jobs:
             mkdir -p "dist/${{ matrix.arch }}/dependency-logs"
             docker cp tmv-build:/var/log/dnf.log "dist/${{ matrix.arch }}/dependency-logs/" || true
             docker cp tmv-build:/var/log/dnf.librepo.log "dist/${{ matrix.arch }}/dependency-logs/" || true
+            docker exec tmv-build chown -R "$(id -u):$(id -g)" /cache
             docker rm -f tmv-build
           fi
       - uses: actions/upload-artifact@v4
