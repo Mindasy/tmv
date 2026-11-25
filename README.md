@@ -463,7 +463,9 @@ sudo bash tools/release/verify-isolated.sh
 
 依赖、离线构建、隔离测试和 runner 要求见 [打包说明](tools/release/README.md)。
 [release.yml](.github/workflows/release.yml) 在两个 openEuler 架构均通过验收后，
-才为匹配版本的 `v*` tag 自动发布 Release；手动触发仅生成构建产物。
+才自动发布 Release。支持 `vX.Y.Z` 和 `vX.Y.Z-后缀`，流水线临时以 tag 中的
+`X.Y.Z` 同步程序、RPM 和文件名版本，不要求预先修改仓库版本，也不会提交修改。
+完整 tag 保留为 Release 名称；带后缀的 tag 标为预发布。分支手动触发沿用仓库版本。
 [ci.yml](.github/workflows/ci.yml) 执行格式、Clippy、单元测试与构建。
 
 ### 与 openEuler 24.03 的 Rust 版本兼容

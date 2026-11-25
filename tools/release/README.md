@@ -30,10 +30,25 @@ bash tools/release/verify-openeuler.sh 2>&1 | tee dist/$(uname -m)/acceptance.lo
 不应描述为 openEuler 内核覆盖。ptrace 测试仅为该临时容器添加 SYS_PTRACE 和
 解除 seccomp 限制，不使用宿主 PID 命名空间。
 
-push 匹配 Cargo.toml 版本的 `v*` tag 自动启动流水线。两个架构均完成构建、
+push `vX.Y.Z` 或 `vX.Y.Z-后缀` tag 自动启动流水线。流水线从 tag 提取 `X.Y.Z`，
+仅在 runner 工作目录临时同步 Cargo.toml、Cargo.lock 中的工作区包、RPM Version、
+man 版本头及随包文档，不提交或推送版本修改。两个架构均完成构建、
 真实进程测试、RPM 安装/卸载和 tar 包测试，且验收对应校验和一致，才自动发布
 GitHub Release。带 `-` 的版本 tag 标为预发布。手动运行仅产生 Actions artifacts，
-不创建 Release。不需要手工上传发布附件。
+不创建 Release；从分支手动运行时沿用仓库版本，从 tag 手动运行时按 tag 提取版本。
+不需要手工上传发布附件。
+
+| tag | 程序/RPM/文件名中的版本 | GitHub Release |
+| --- | --- | --- |
+| `v1.2.3` | `1.2.3` | 正式版，保留完整 tag |
+| `v1.2.3-20261125` | `1.2.3` | 预发布，保留完整 tag |
+| `v1.2.3-rc.1` | `1.2.3` | 预发布，保留完整 tag |
+
+后缀不参与 RPM Version/Release，同一 `X.Y.Z` 的不同 tag 生成相同版本号和文件名，
+分别作为各自 Release 的附件；RPM 不会把后缀变化视为版本升级。
+RPM Source0/Source1 使用完整 tag 定位源码包。非法 tag 在打包前失败。
+本地手动使用 `python3 tools/release/set-version.py v1.2.3-20261125` 会修改当前
+工作目录的版本文件，建议仅在临时 checkout 执行；测试运行 `python3 tools/release/test-version.py`。
 
 示例包演示的是采样状态，不是每次分配事件的精确重放。采集要求同架构
 64 位 Linux/glibc 动态链接目标；不能由 musl 主程序的兼容性推导采集兼容性。

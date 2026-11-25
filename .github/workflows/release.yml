@@ -22,12 +22,11 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: Check version
+      - name: Set package version from tag
         shell: bash
         run: |
-          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            test "$GITHUB_REF_NAME" = "v$version"
+            python3 tools/release/set-version.py "$GITHUB_REF_NAME"
           fi
           test "$(uname -m)" = '${{ matrix.arch }}'
       - name: Build and test in openEuler 24.03
@@ -45,7 +44,7 @@ jobs:
           docker image inspect openeuler/openeuler:24.03-lts --format '{{json .RepoDigests}}' \
             > dist/${{ matrix.arch }}/CONTAINER-IMAGE.txt
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && hashFiles(format('dist/{0}/**', matrix.arch)) != ''
         with:
           name: openeuler-24.03-${{ matrix.arch }}
           path: dist/${{ matrix.arch }}/

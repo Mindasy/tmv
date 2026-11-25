@@ -31,6 +31,16 @@ static pid_t owner;
 static uint64_t seq;
 static char maps_path[4096];
 static char ids_path[4096];
+/* Metadata/diagnostics can be interrupted or written only partially. */
+static int write_all(int out, const char *buf, size_t left) {
+    while(left) {
+        ssize_t n=write(out,buf,left);
+        if(n<0 && errno==EINTR) continue;
+        if(n<=0) return -1;
+        buf+=n; left-=(size_t)n;
+    }
+    return 0;
+}
 /* Serializing allocator calls as well as records prevents address reuse races. */
 static int enter(int capture) {
     if (busy || fd < 0 || getpid() != owner) return 0;
@@ -139,7 +149,7 @@ static int module_id(struct dl_phdr_info *info, size_t ignored, void *arg) {
                 for(unsigned j=0;j<h.n_descsz;j++) snprintf(hex+j*2,3,"%02x",id[j]);
                 hex[h.n_descsz*2]=0;
                 int n=snprintf(line,sizeof(line),"%s %s\n",hex,name);
-                if(n>0 && n<(int)sizeof(line)) (void)write(out,line,(size_t)n);
+                if(n>0 && n<(int)sizeof(line) && write_all(out,line,(size_t)n)<0) return 1;
                 break;
             }
             size_t step=sizeof(h)+ns+ds; p+=step; left-=step;
@@ -180,7 +190,8 @@ __attribute__((constructor)) static void start(void) {
         if(il>0 && il<(int)sizeof(ids_path) && len>0 && len<(int)sizeof(path) && ml>0 && ml<(int)sizeof(maps_path))
             fd=open(path,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
         if(fd>=0) { event(0,0,0,0,0); save_maps(); }
-        else { const char msg[]="tmvtrace: cannot create trace file\n"; (void)write(2,msg,sizeof(msg)-1); }
+        /* A diagnostic cannot recover if stderr itself is unavailable. */
+        else { const char msg[]="tmvtrace: cannot create trace file\n"; (void)write_all(2,msg,sizeof(msg)-1); }
     }
     busy=0;
 }

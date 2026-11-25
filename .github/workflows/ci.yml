@@ -27,6 +27,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Release tag version mapping
+        run: python3 tools/release/test-version.py
+
       - name: 测试
         run: cargo test --workspace
 
@@ -36,6 +39,7 @@ jobs:
       - name: Linux glibc preload integration
         run: |
           cargo build --locked
+          make -B -C tools/heaptrace CFLAGS='-O2 -g -Wall -Wextra -Werror -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2'
           sh tools/heaptrace/test.sh
 
       - name: Session recording and offline replay

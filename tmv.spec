@@ -3,6 +3,7 @@
 # Build with tools/release/build-openeuler.sh on openEuler 24.03.
 
 %global project_url https://github.com/Mindasy/tmv
+%global release_tag v%{version}
 
 Name:           tmv
 Version:        0.2.0
@@ -12,9 +13,9 @@ Group:          Applications/System
 
 License:        MIT
 URL:            %{project_url}
-Source0:        %{project_url}/releases/download/v%{version}/%{name}-%{version}.tar.gz
+Source0:        %{project_url}/releases/download/%{release_tag}/%{name}-%{version}.tar.gz
 # cargo vendor 生成的第三方依赖，随 release 一同发布。
-Source1:        %{project_url}/releases/download/v%{version}/%{name}-%{version}-vendor.tar.gz
+Source1:        %{project_url}/releases/download/%{release_tag}/%{name}-%{version}-vendor.tar.gz
 
 ExclusiveArch:  aarch64 x86_64
 
