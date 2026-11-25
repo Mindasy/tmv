@@ -78,8 +78,20 @@ jobs:
         timeout-minutes: 6
         shell: bash
         run: |
-          set -o pipefail
-          docker exec tmv-build bash tools/release/verify-openeuler.sh 2>&1 | tee dist/${{ matrix.arch }}/acceptance.log
+          dist="dist/${{ matrix.arch }}"
+          docker run --rm --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+            -v "$PWD:/src:ro" -w /tmp/verify tmv-builder bash -ec '
+              cp -r /src/tools /src/Cargo.toml .
+              ln -s /src/dist dist
+              bash tools/release/verify-openeuler.sh archive
+            ' > "$dist/archive-acceptance.log" 2>&1 &
+          archive_pid=$!
+          status=0
+          docker exec tmv-build bash tools/release/verify-openeuler.sh rpm > "$dist/rpm-acceptance.log" 2>&1 || status=1
+          wait "$archive_pid" || status=1
+          cat "$dist"/{rpm,archive}-acceptance.log | tee "$dist/acceptance.log"
+          (( status == 0 ))
+          bash tools/release/accept-result.sh "$dist" '${{ matrix.arch }}'
       - name: Collect dependency logs and remove container
         if: always()
         timeout-minutes: 2
@@ -98,6 +110,7 @@ jobs:
           name: openeuler-24.03-${{ matrix.arch }}
           path: dist/${{ matrix.arch }}/
           if-no-files-found: error
+          compression-level: 0
 
   publish:
     needs: package
