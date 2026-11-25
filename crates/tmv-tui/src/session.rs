@@ -40,11 +40,11 @@ pub fn run_at(path: &Path, at: Option<u64>) -> io::Result<()> {
     } else {
         manifest.frames - 1
     };
-    let mut sample = session::frame(path, index)?;
+    let mut sample = tmv_symbols::replay::frame(path, index, manifest.pid)?;
     if manifest.state != "recording" && at.is_none() {
         while index > 0 && sample.snapshot.is_none() {
             index -= 1;
-            sample = session::frame(path, index)?;
+            sample = tmv_symbols::replay::frame(path, index, manifest.pid)?;
         }
     }
     let mut app = App::new(
@@ -67,6 +67,7 @@ pub fn run_at(path: &Path, at: Option<u64>) -> io::Result<()> {
     let mut playing = false;
     let mut last_step = Instant::now();
     let mut stack_view: Option<Vec<String>> = None;
+    let mut session_help = false;
     let mut stack_scroll = 0usize;
     let mut trend = Vec::new();
     if offline {
@@ -112,12 +113,17 @@ pub fn run_at(path: &Path, at: Option<u64>) -> io::Result<()> {
             terminal.draw(|frame| {
                 controls.hits.borrow_mut().clear();
                 let area=frame.area();
-                let main=Rect::new(area.x,area.y,area.width,area.height.saturating_sub(if offline {6}else{0}));
-                timeline_area=Rect::new(area.x,area.y+main.height,area.width,area.height.saturating_sub(main.height).saturating_sub(1));
+                    use crate::mouse::Action;
+                    let mut items=vec![("布局/分配",Action::Key(KeyCode::Tab)),("返回",Action::Key(KeyCode::Backspace)),("列表",Action::Key(KeyCode::Char('v'))),("地址图",Action::Key(KeyCode::Char('b'))),("栈",Action::Key(KeyCode::Char('t'))),("帮助",Action::Key(KeyCode::Char('?'))),("退出",Action::Key(KeyCode::Char('q')))];
+                    if allocation && list && !blockmap {items.insert(0,(app.list_unit.button(),Action::Key(KeyCode::Char('U'))));}
+                    if offline {items.extend([("前一",Action::Key(KeyCode::Char('['))),("后一",Action::Key(KeyCode::Char(']'))),("播放",Action::Key(KeyCode::Char(' '))),("峰值",Action::Key(KeyCode::Char('P'))),("时间",Action::Key(KeyCode::Char('T'))),("度量",Action::Key(KeyCode::Char('M')))]);}else{items.push(("暂停跟随",Action::Key(KeyCode::Char(' '))));}
+                let rows=crate::mouse::button_rows(area.width,&items).min(area.height);
+                let main=Rect::new(area.x,area.y,area.width,area.height.saturating_sub(rows + if offline {5}else{0}));
+                timeline_area=Rect::new(area.x,area.y+main.height,area.width,area.height.saturating_sub(main.height).saturating_sub(rows));
                 if allocation {
                     let (left,right)=allocation_columns(main);
                     side_area=right;
-                    block_hits=draw_allocations(frame,focused,selected,list,blockmap,sample.heap_records,left);
+                    block_hits=draw_allocations(frame,focused,selected,list.then_some(app.list_unit),blockmap,sample.heap_records,left);
                     side_scroll=draw_stack_side(frame,right,&side_lines,side_scroll);
                 } else if sample.snapshot.is_none() {
                     frame.render_widget(Paragraph::new(format!("此采样点没有布局数据：{}\n按 [ 查看前一采样；Tab 查看分配归因。",sample.layout_error.as_deref().unwrap_or("未采集"))),main);
@@ -125,21 +131,16 @@ pub fn run_at(path: &Path, at: Option<u64>) -> io::Result<()> {
                 if offline {timeline::draw(frame,timeline_area,&trend,index,trend_rss);}
                 let area=frame.area();
                 if area.height>0 && app.memory.is_none() && !app.show_help && !app.show_settings && !app.show_accounting && app.input.is_none() {
-                    let footer=format!("{} {:.3}s [{}/{}] {} | Tab 布局/分配 [] 前后 空格{} End 最新{} t 栈 b 地址 v 列表 q 退出",if allocation{"分配"}else{"布局"},sample.elapsed_ms as f64/1000.,index+1,manifest.frames,manifest.state,if manifest.state=="recording"{"暂停跟随"}else{"播放"},if offline {" P峰值 T时间 M度量"}else{""});
-                    let _=footer;
-                    use crate::mouse::Action;
-                    let mut items=vec![("布局/分配",Action::Key(KeyCode::Tab)),("返回",Action::Key(KeyCode::Backspace)),("列表",Action::Key(KeyCode::Char('v'))),("地址图",Action::Key(KeyCode::Char('b'))),("栈",Action::Key(KeyCode::Char('t'))),("退出",Action::Key(KeyCode::Char('q')))];
-                    if offline {items.extend([("前一",Action::Key(KeyCode::Char('['))),("后一",Action::Key(KeyCode::Char(']'))),("播放",Action::Key(KeyCode::Char(' '))),("峰值",Action::Key(KeyCode::Char('P'))),("时间",Action::Key(KeyCode::Char('T'))),("度量",Action::Key(KeyCode::Char('M')))]);}else{items.push(("暂停跟随",Action::Key(KeyCode::Char(' '))));}
-                    crate::mouse::buttons(frame,Rect::new(area.x,area.bottom()-1,area.width,1),&items,&controls);
+                    crate::mouse::buttons(frame,Rect::new(area.x,area.bottom()-rows,area.width,rows),&items,&controls);
                 }
                 if let Some(input)=&time_input {
                     controls.hits.borrow_mut().clear();
                     frame.render_widget(Paragraph::new(format!("距记录开始的秒数 [{:.3}～{:.3}] 当前 {:.3}s: {input}  Enter确认 Esc取消  {time_error}",trend.first().map_or(0.,|p|p.ms as f64/1000.),trend.last().map_or(0.,|p|p.ms as f64/1000.),sample.elapsed_ms as f64/1000.)).style(Style::default().fg(Color::Yellow)),Rect::new(area.x,area.bottom().saturating_sub(1),area.width,1));
                 }
-                if time_input.is_some() {crate::mouse::buttons(frame,Rect::new(area.right().saturating_sub(18),area.bottom().saturating_sub(1),18,1),&[("确认",crate::mouse::Action::Key(KeyCode::Enter)),("取消",crate::mouse::Action::Key(KeyCode::Esc))],&controls);}
+                if time_input.is_some() {crate::mouse::buttons(frame,Rect::new(area.right().saturating_sub(26),area.bottom().saturating_sub(1),26,1),&[("确认",crate::mouse::Action::Key(KeyCode::Enter)),("取消",crate::mouse::Action::Key(KeyCode::Esc))],&controls);}
                 if let Some(lines)=&stack_view {
-                    controls.hits.borrow_mut().clear();draw_stack_popup(frame,lines,stack_scroll);
-                    crate::mouse::buttons(frame,Rect::new(area.right().saturating_sub(10),area.y+1,9,1),&[("关闭",crate::mouse::Action::Key(KeyCode::Esc))],&controls);
+                    controls.hits.borrow_mut().clear();draw_stack_popup(frame,lines,stack_scroll,session_help);
+                    crate::mouse::buttons(frame,Rect::new(area.right().saturating_sub(12),area.y+1,12,1),&[("关闭",crate::mouse::Action::Key(KeyCode::Esc))],&controls);
                 }
             })?;
             let mut next = index;
@@ -284,7 +285,8 @@ pub fn run_at(path: &Path, at: Option<u64>) -> io::Result<()> {
                                 {
                                     Some(Ok(target)) => {
                                         index = target;
-                                        sample = session::frame(path, index)?;
+                                        sample =
+                                            tmv_symbols::replay::frame(path, index, manifest.pid)?;
                                         if let Some(snapshot) = &sample.snapshot {
                                             app.set_session_snapshot(snapshot.clone());
                                         }
@@ -335,6 +337,24 @@ pub fn run_at(path: &Path, at: Option<u64>) -> io::Result<()> {
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             break
                         }
+                        KeyCode::Char('?') => {
+                            let mut lines = vec![
+                                "Tab 布局/分配；v 列表；b 地址图；列表内 U 单位".to_owned(),
+                                "[ / ] 上一/下一采样；End 最新；q 退出".to_owned(),
+                            ];
+                            lines.push(if allocation { "方向键选择，Enter 下钻，Backspace 返回，t 展开分配栈，PgUp/PgDn 滚动" } else { "1 方块 / 2 地址图 / 3 映射列表；m 度量，g 分组，o 排序" }.into());
+                            lines.push(
+                                if offline {
+                                    "Space 播放/暂停；T 输入经过秒数，M 切换曲线，P 跳到峰值"
+                                } else {
+                                    "Space 暂停/恢复跟随"
+                                }
+                                .into(),
+                            );
+                            session_help = true;
+                            stack_view = Some(lines);
+                            stack_scroll = 0;
+                        }
                         KeyCode::Tab => allocation = !allocation,
                         KeyCode::Char('M') if offline => trend_rss = !trend_rss,
                         KeyCode::Char('T') if offline => {
@@ -355,6 +375,7 @@ pub fn run_at(path: &Path, at: Option<u64>) -> io::Result<()> {
                         }
                         KeyCode::Char('t') if allocation => {
                             if focused.children.get(selected).is_some() {
+                                session_help = false;
                                 stack_view = Some(side_lines.clone());
                                 stack_scroll = 0;
                                 following = false;
@@ -384,7 +405,13 @@ pub fn run_at(path: &Path, at: Option<u64>) -> io::Result<()> {
                             }
                         }
                         KeyCode::Char('b') if allocation => blockmap = !blockmap,
-                        KeyCode::Char('v') if allocation => list = !list,
+                        KeyCode::Char('U') if allocation && list && !blockmap => {
+                            app.list_unit.next()
+                        }
+                        KeyCode::Char('v') if allocation => {
+                            list = !list || blockmap;
+                            blockmap = false;
+                        }
                         KeyCode::Down | KeyCode::Right if allocation => {
                             selected = (selected + 1).min(focused.children.len().saturating_sub(1))
                         }
@@ -427,7 +454,7 @@ pub fn run_at(path: &Path, at: Option<u64>) -> io::Result<()> {
             }
             if next != index {
                 index = next;
-                sample = session::frame(path, index)?;
+                sample = tmv_symbols::replay::frame(path, index, manifest.pid)?;
                 if let Some(snapshot) = &sample.snapshot {
                     app.set_session_snapshot(snapshot.clone());
                 }
@@ -496,7 +523,7 @@ fn draw_stack_side(
     scroll
 }
 
-fn draw_stack_popup(frame: &mut ratatui::Frame, lines: &[String], scroll: usize) {
+fn draw_stack_popup(frame: &mut ratatui::Frame, lines: &[String], scroll: usize, help: bool) {
     let area = frame.area();
     let rect = Rect::new(
         area.x + 1,
@@ -505,9 +532,11 @@ fn draw_stack_popup(frame: &mut ratatui::Frame, lines: &[String], scroll: usize)
         area.height.saturating_sub(2),
     );
     frame.render_widget(Clear, rect);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("分配时调用栈（非线程当前栈） ↑↓ PgUp/PgDn 滚动，t/Esc 关闭");
+    let block = Block::default().borders(Borders::ALL).title(if help {
+        "会话帮助 · ↑↓ 滚动，Esc 关闭"
+    } else {
+        "分配时调用栈（非线程当前栈） ↑↓ PgUp/PgDn 滚动，t/Esc 关闭"
+    });
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     frame.render_widget(
@@ -528,7 +557,7 @@ fn draw_allocations(
     frame: &mut ratatui::Frame,
     node: &MemNode,
     selected: usize,
-    list: bool,
+    list: Option<ui::ListUnit>,
     blockmap: bool,
     records: u64,
     area: Rect,
@@ -565,7 +594,7 @@ fn draw_allocations(
         );
     } else if blockmap {
         hits = ui::draw_address_blocks(frame, &node.children, selected, inner);
-    } else if list {
+    } else if let Some(unit) = list {
         let offset = selected.saturating_sub(inner.height as usize / 2);
         let lines = node
             .children
@@ -577,13 +606,17 @@ fn draw_allocations(
                 format!(
                     "{} {:>12} {:>6.2}% {}",
                     if i == selected { ">" } else { " " },
-                    n.bytes,
+                    unit.format(n.bytes),
                     if node.bytes == 0 {
                         0.
                     } else {
                         100. * n.bytes as f64 / node.bytes as f64
                     },
-                    n.label
+                    if n.children.is_empty() {
+                        format!("0x{:x}", n.start)
+                    } else {
+                        n.label.clone()
+                    }
                 )
             })
             .collect::<Vec<_>>()
@@ -649,7 +682,7 @@ mod tests {
         };
         terminal
             .draw(|f| {
-                draw_allocations(f, &root, 0, false, false, 2, f.area());
+                draw_allocations(f, &root, 0, None, false, 2, f.area());
             })
             .unwrap();
         let text = terminal
@@ -664,7 +697,7 @@ mod tests {
         terminal.clear().unwrap();
         terminal
             .draw(|f| {
-                draw_allocations(f, &root, 0, false, false, 0, f.area());
+                draw_allocations(f, &root, 0, None, false, 0, f.area());
             })
             .unwrap();
         let text = terminal

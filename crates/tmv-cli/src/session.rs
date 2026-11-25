@@ -51,11 +51,11 @@ pub enum Command {
         /// 目标进程 PID
         pid: i32,
     },
-    /// 打开会话；记录中跟随，已结束时支持时间轴和离线回放
+    /// 打开会话；Tab 切换布局/分配，? 查看按键，已结束时支持时间轴回放
     Open {
         /// .tmvr 会话目录
         path: PathBuf,
-        /// 距记录开始的秒数，选此前最近采样（如 9.5）；open 要求记录已结束
+        /// 距记录开始的秒数，选取该时刻或此前最近的采样；仅适用于已结束的会话
         #[arg(long)]
         at: Option<f64>,
     },
@@ -63,7 +63,7 @@ pub enum Command {
     Report {
         /// .tmvr 会话目录
         path: PathBuf,
-        /// 距记录开始的秒数，选此前最近采样（如 9.5）；open 要求记录已结束
+        /// 距记录开始的秒数，选取该时刻或此前最近的采样；省略时读取最新采样
         #[arg(long)]
         at: Option<f64>,
         /// allocation 为存活申请字节，layout 为保存的进程布局
@@ -116,7 +116,7 @@ pub fn dispatch(command: &Command) -> Result<()> {
                     .map(|t| session::at(path, &m, t))
                     .transpose()?
                     .unwrap_or(m.frames.saturating_sub(1));
-                let f = session::frame(path, index)?;
+                let f = tmv_symbols::replay::frame(path, index, m.pid)?;
                 for node in session::allocation_tree(&f).children.iter().take(*top) {
                     println!("{}", session::stack_lines(&f, &node.label, None).join("\n"));
                 }
@@ -347,7 +347,10 @@ fn record(
                         .iter()
                         .filter(|r| {
                             resolved.as_ref().is_some_and(|symbol| {
-                                symbol.symbol.as_deref() == Some(r.function.as_str())
+                                symbol
+                                    .symbol
+                                    .as_deref()
+                                    .is_some_and(|s| tmv_symbols::function_matches(s, &r.function))
                                     && r.return_offset.is_none_or(|offset| offset == symbol.offset)
                             }) && id.as_deref() == Some(r.build_id.as_str())
                         })
@@ -473,7 +476,7 @@ fn report(
     } else {
         m.frames.checked_sub(1).context("no samples")?
     };
-    let frame = session::frame(path, index)?;
+    let frame = tmv_symbols::replay::frame(path, index, m.pid)?;
     if json {
         println!("{}", serde_json::to_string(&frame)?);
         return Ok(());

@@ -15,6 +15,7 @@ bash tools/release/verify-openeuler.sh 2>&1 | tee dist/$(uname -m)/acceptance.lo
 `TMV_VENDOR_ARCHIVE=/path/tmv-0.2.0-vendor.tar.gz` 全程离线构建。构建目录默认在
 /var/tmp（可以使用 TMV_BUILD_ROOT 指定磁盘目录），保留用于诊断。
 输出在 dist/<arch>/，包含 RPM、SRPM、完整 tar 包、源码/vendor、校验与构建记录。
+二进制 RPM 只安装主程序、采集库、Bash 补全文件、手册、文档和许可证。免安装包保留 examples/demo.tmvr。
 源码包使用文件白名单，排除本地二进制、录制文件、缓存。
 
 验收脚本要求机器原先没有 tmv RPM，不覆盖已有安装。安装、测试、卸载 RPM，
@@ -25,7 +26,7 @@ bash tools/release/verify-openeuler.sh 2>&1 | tee dist/$(uname -m)/acceptance.lo
 
 发布工作流使用 GitHub 托管 `ubuntu-24.04`（x86_64）和 `ubuntu-24.04-arm`
 （aarch64）runner，在官方 `openeuler/openeuler:24.03-lts` 容器内原生执行相同脚本。
-不使用会滚动指向新 SP 的 `24.03` / `latest`；产物记录实际容器镜像 digest。
+不使用会滚动指向新 SP 的 `24.03` / `latest`；产物记录实际工具链镜像 ID。
 容器使用宿主 Linux 内核，因此另行保留 openEuler 完整 VM 的验证结果；容器测试
 不应描述为 openEuler 内核覆盖。ptrace 测试仅为该临时容器添加 SYS_PTRACE 和
 解除 seccomp 限制，不使用宿主 PID 命名空间。
@@ -34,8 +35,7 @@ push `vX.Y.Z` 或 `vX.Y.Z-后缀` tag 自动启动流水线。流水线从 tag �
 仅在 runner 工作目录临时同步 Cargo.toml、Cargo.lock 中的工作区包、RPM Version、
 man 版本头及随包文档，不提交或推送版本修改。两个架构均完成构建、
 真实进程测试、RPM 安装/卸载和 tar 包测试，且验收对应校验和一致，才自动发布
-GitHub Release。带 `-` 的版本 tag 标为预发布。手动运行仅产生 Actions artifacts，
-不创建 Release；从分支手动运行时沿用仓库版本，从 tag 手动运行时按 tag 提取版本。
+GitHub Release。带 `-` 的版本 tag 标为预发布。从分支手动运行时沿用仓库版本，只生成 Actions artifacts；从 tag 手动运行会提取版本并在验收通过后发布。
 不需要手工上传发布附件。
 
 | tag | 程序/RPM/文件名中的版本 | GitHub Release |

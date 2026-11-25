@@ -58,7 +58,7 @@ make -C tools/heaptrace CFLAGS="%{optflags} -fno-omit-frame-pointer"
 %install
 install -Dpm0755 "${CARGO_TARGET_DIR:-target}"/release/%{name} %{buildroot}%{_bindir}/%{name}
 install -Dpm0755 tools/heaptrace/libtmvtrace.so %{buildroot}%{_libdir}/tmv/libtmvtrace.so
-install -Dpm0644 tools/heaptrace/demo/memory_demo.c %{buildroot}%{_docdir}/tmv/examples/memory_demo.c
+install -Dpm0644 tools/completions/tmv.sh %{buildroot}%{_datadir}/bash-completion/completions/tmv
 install -Dpm0644 tmv.1 %{buildroot}%{_mandir}/man1/tmv.1
 # 不生成 debuginfo 包（见文件头 debug_package），这里显式剥离调试符号。
 %{__strip} --strip-unneeded %{buildroot}%{_bindir}/%{name}
@@ -70,8 +70,8 @@ cargo test --release --offline --locked --frozen
 %files
 %{_bindir}/%{name}
 %{_libdir}/tmv/
-%{_docdir}/tmv/examples/
 %{_mandir}/man1/tmv.1*
+%{_datadir}/bash-completion/completions/tmv
 %doc README.md RELEASE-NOTES.md
 %license LICENSE
 

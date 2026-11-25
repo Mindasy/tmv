@@ -26,7 +26,7 @@ root=pathlib.Path(sys.argv[1])
 with tarfile.open(sys.argv[2],'w:gz') as t:
     files=['Cargo.toml','Cargo.lock','README.md','RELEASE-NOTES.md','LICENSE','clippy.toml','tmv.spec','tmv.1']
     for folder in ['crates','tools']:
-        files += [str(p.relative_to(root)) for p in (root/folder).rglob('*') if p.is_file() and p.suffix in ('.rs','.toml','.c','.h','.sh','.py','.md')]
+        files += [str(p.relative_to(root)) for p in (root/folder).rglob('*') if p.is_file() and p.suffix in ('.rs','.toml','.c','.cpp','.h','.sh','.py','.md')]
     files += ['tools/heaptrace/Makefile']
     for f in sorted(set(files)):
         t.add(root/f,arcname='tmv-'+sys.argv[3]+'/'+f,recursive=False)

@@ -82,7 +82,7 @@
 - `F` 用正则过滤（不区分大小写），语法错误时保留原过滤条件并在状态行提示
 - 过滤同时作用于 treemap、列表与 `/` 地址跳转，状态行显示「过滤:关键字 命中/总数」，正则显示为 `/pattern/`
 - 被过滤掉的地址用 `/` 查询时会提示「不在当前过滤结果中」
-- `?` 打开帮助面板，集中列出全部按键，任意键关闭
+- `?` 打开帮助面板，查看布局操作，任意键关闭；在会话中用 `?` 查看会话快捷键，Esc 关闭
 
 ### 时间维度
 
@@ -254,10 +254,14 @@ Error: 进程 2000000000 不存在
 | `r` | 立即重新采样（并刷新线程列表） |
 | `rr` | 快速连按两次 `r`：开关定时刷新 |
 | `s` | 打开设置界面（间隔、定时刷新、页图、变化标记） |
-| `?` | 打开帮助面板（任意键关闭） |
+| `?` | 布局操作菜单（任意键关闭）；会话帮助用 Esc 关闭 |
 | `q` / `Ctrl-C` | 退出 |
 
 设置界面内：`↑↓` 选择，`←→` / `+` / `-` 调整，`Enter` / `Space` 切换，`Esc` / `s` 关闭。
+
+映射列表与分配排行列表中，按大写 `U` 或点击“单位”可依次切换自动、B、KiB、MiB、GiB；排序和百分比使用原始字节数。
+
+按钮内显示对应快捷键，如 `[布局/分配 Tab]`、`[设置 s]`；布局工具栏的 `1/2/3` 分别直达方块、地址图和列表。
 
 ## 配置持久化
 
@@ -425,12 +429,11 @@ cargo test --release -p tmv-tui -- --ignored --nocapture large_snapshot
 ## 发布与分发（openEuler 24.03）
 
 0.2.0 完整版包含主程序和采集库，分别构建 aarch64、x86_64 的 RPM 与免安装包。
-各架构必须通过自己的安装包验收；具体结果见包内/附件的 `ACCEPTANCE.txt` 与
-`BUILD-INFO.txt`。仿真测试标明 QEMU，不等同于原生性能测试。
+各架构必须通过自己的安装包验收；验收记录和构建信息可在对应 Release 工作流的 Actions artifacts 中按架构下载。仿真测试标明 QEMU，不等同于原生性能测试。
 
 | 产物 | 用途 |
 | --- | --- |
-| `tmv-0.2.0-1.oe2403.<arch>.rpm` | 安装到 `/usr/bin/tmv` 和 `/usr/lib64/tmv/libtmvtrace.so` |
+| `tmv-0.2.0-1.oe2403.<arch>.rpm` | 安装主程序、采集库、手册和文档，不安装 examples |
 | `tmv-0.2.0-openEuler-24.03-<arch>.tar.gz` | 解压运行；主程序旁附采集库与示例回放 |
 | `tmv-0.2.0.tar.gz` / `tmv-0.2.0-vendor.tar.gz` | 源码与完整离线 Rust 依赖 |
 | `tmv-0.2.0-1.oe2403.src.rpm` | 源码 RPM |
@@ -448,6 +451,8 @@ cd tmv-0.2.0-openEuler-24.03-aarch64
 ./tmv open examples/demo.tmvr --at 9
 ./tmv run --output service.tmvr -- ./your-service
 ```
+
+RPM 提供 Bash 的 Tab 补全（例如 `tmv rep<Tab>`、`tmv report --ana<Tab>`）。启用 bash-completion 的交互式 Bash 会自动加载；也可在当前 Bash 执行 `source /usr/share/bash-completion/completions/tmv`。
 
 无需系统全局配置 LD_PRELOAD；只给 `run` 启动的目标注入采集库。
 本专用包使用 openEuler 24.03 的 glibc 构建，不能当作任意发行版通用静态包。
@@ -492,6 +497,9 @@ openEuler 24.03 LTS 自带 `rust 1.82`，无法解析 `edition2024` 的依赖清
 
 采集库当前支持 **64 位 Linux/glibc、从启动跟踪的动态链接程序**。
 完整版已附带采集库；源码使用方式如下。自行构建时 tmv 主程序也可使用 musl，采集库仍必须匹配目标 glibc 与架构。
+
+回放时若分配栈只有地址，`tmv open` 和 `tmv report` 会按录制映射及 GNU Build ID 从原路径补查 ELF。跨机时，可按会话中 `heap.<pid>.ids` 记下的十六进制 ID，将对应的带符号 ELF 放到 `会话目录/symbols/<ID>`。函数名需要符号表，源码行需要调试信息。未标定的分配按模块和调用函数合并；调用方地址无法解析时依次查找原始分配栈。C++ 签名保留命名空间、类名和参数，以区分重载。右侧保留每帧地址、偏移和递归层级。
+
 
 ```bash
 make -C tools/heaptrace

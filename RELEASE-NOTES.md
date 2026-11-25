@@ -17,6 +17,6 @@ does not reconstruct past allocations. Recording stacks has runtime overhead.
 
 Unpack the full archive and run ./tmv; the adjacent libtmvtrace.so is discovered
 automatically. RPM installs it in /usr/lib64/tmv/. No global preload is configured.
-Inspect a supplied example with: ./tmv open examples/demo.tmvr --at 9
+The binary RPM installs no examples. In the portable archive, open the bundled recording with: ./tmv open examples/demo.tmvr --at 9
 
 For native package builds and acceptance see tools/release/README.md.

@@ -33,8 +33,21 @@ pub(crate) fn draw_in(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         0
     };
+    let toolbar = &[
+        ("方块", Action::Key(KeyCode::Char('1'))),
+        ("地址图", Action::Key(KeyCode::Char('2'))),
+        ("列表", Action::Key(KeyCode::Char('3'))),
+        ("菜单", Action::Key(KeyCode::Char('?'))),
+        ("返回", Action::Key(KeyCode::Backspace)),
+        ("度量", Action::Key(KeyCode::Char('m'))),
+        ("分组", Action::Key(KeyCode::Char('g'))),
+        ("刷新", Action::Key(KeyCode::Char('r'))),
+        ("内存", Action::Key(KeyCode::Char('x'))),
+        ("设置", Action::Key(KeyCode::Char('s'))),
+    ];
+    let toolbar_rows = crate::mouse::button_rows(area.width, toolbar);
     let chunks = Layout::vertical([
-        Constraint::Length(2),
+        Constraint::Length(1 + toolbar_rows),
         Constraint::Min(5),
         Constraint::Length(bottom_height),
         Constraint::Length(3),
@@ -49,19 +62,8 @@ pub(crate) fn draw_in(frame: &mut Frame, app: &mut App, area: Rect) {
     );
     buttons(
         frame,
-        Rect::new(chunks[0].x, chunks[0].y + 1, chunks[0].width, 1),
-        &[
-            ("方块", Action::View(ViewMode::Treemap)),
-            ("地址图", Action::View(ViewMode::Blockmap)),
-            ("列表", Action::View(ViewMode::List)),
-            ("菜单", Action::Key(KeyCode::Char('?'))),
-            ("返回", Action::Key(KeyCode::Backspace)),
-            ("度量", Action::Key(KeyCode::Char('m'))),
-            ("分组", Action::Key(KeyCode::Char('g'))),
-            ("刷新", Action::Key(KeyCode::Char('r'))),
-            ("内存", Action::Key(KeyCode::Char('x'))),
-            ("设置", Action::Key(KeyCode::Char('s'))),
-        ],
+        Rect::new(chunks[0].x, chunks[0].y + 1, chunks[0].width, toolbar_rows),
+        toolbar,
         &app.mouse,
     );
 
@@ -390,11 +392,23 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect) {
         SortOrder::SizeDesc => format!("按 {} 降序", app.metric.label()),
         SortOrder::Address => "按地址升序".to_string(),
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" 映射列表 · {} 项 · {order} ", rows.len()));
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        "                  映射列表 · {} 项 · {order} ",
+        rows.len()
+    ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    buttons(
+        frame,
+        Rect::new(
+            area.x.saturating_add(1),
+            area.y,
+            area.width.saturating_sub(2),
+            1,
+        ),
+        &[(app.list_unit.button(), Action::Key(KeyCode::Char('U')))],
+        &app.mouse,
+    );
     if inner.height == 0 || inner.width == 0 {
         return;
     }
@@ -428,10 +442,10 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect) {
             let text = format!(
                 "{:<25} {:>8} {:>8} {:>8} {:>8} {:<5} {}",
                 format!("0x{:x}-0x{:x}", vma.start, vma.end),
-                human_bytes(vma.end.saturating_sub(vma.start)),
-                human_bytes(stats.map_or(0, |stats| stats.rss)),
-                human_bytes(stats.map_or(0, |stats| stats.pss)),
-                human_bytes(stats.map_or(0, |stats| stats.swap)),
+                app.list_unit.format(vma.end.saturating_sub(vma.start)),
+                app.list_unit.format(stats.map_or(0, |stats| stats.rss)),
+                app.list_unit.format(stats.map_or(0, |stats| stats.pss)),
+                app.list_unit.format(stats.map_or(0, |stats| stats.swap)),
                 vma.perms.as_str(),
                 vma.label()
             );
@@ -969,25 +983,69 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// 帮助面板里的按键说明，按「分类 / 按键 / 说明」预排版，避免中英混排错位。
-const HELP_LINES: [&str; 18] = [
-    " 移动   ←→↑↓ / hjkl    选择相邻块；列表视图逐行移动",
-    " 导航   Enter / Esc     下钻 / 返回；列表视图切回 treemap",
-    " 视图   v               treemap ↔ 映射列表",
-    " 地址图 b               地址区间视图（每区间独立缩放）",
-    " 过滤   f               路径 / 标签 / 权限，Enter 应用",
-    " 过滤   F               同一范围的正则过滤，Enter 应用",
-    " 地址   /               解析十六进制地址并跳转",
-    " 度量   m               PSS / RSS / 虚拟 / 独占 / 共享 / Swap",
-    " 分组   g               类别 / 文件 / 映射",
-    " 排序   o               大小 / 地址（同时作用于列表）",
-    " 面板   p               页图",
-    " 面板   t               线程调用栈",
-    " 面板   a               内存账务",
-    " 设置   s               定时刷新与界面设置",
-    " 内存   x               十六进制查看当前映射内容",
-    " 刷新   r rr s          立即刷新 / 定时刷新 / 设置",
-    " 进程   Esc q           根层 Esc 退出；q 随时退出",
-    " 关闭   任意键          关闭本帮助",
+const HELP_LINES: &[(&str, KeyCode)] = &[
+    (
+        " 移动   ←→↑↓ / hjkl    选择相邻块；列表视图逐行移动",
+        KeyCode::Down,
+    ),
+    (
+        " 导航   Enter / Esc     下钻 / 返回；列表视图切回 treemap",
+        KeyCode::Enter,
+    ),
+    (" 布局   1               方块图", KeyCode::Char('1')),
+    (" 布局   2               地址图", KeyCode::Char('2')),
+    (" 布局   3               映射列表", KeyCode::Char('3')),
+    (" 布局   U               切换列表单位", KeyCode::Char('U')),
+    (" 视图   v               切换映射列表", KeyCode::Char('v')),
+    (
+        " 地址图 b               地址区间视图（每区间独立缩放）",
+        KeyCode::Char('b'),
+    ),
+    (
+        " 过滤   f               路径 / 标签 / 权限，Enter 应用",
+        KeyCode::Char('f'),
+    ),
+    (
+        " 过滤   F               同一范围的正则过滤，Enter 应用",
+        KeyCode::Char('F'),
+    ),
+    (
+        " 地址   /               解析十六进制地址并跳转",
+        KeyCode::Char('/'),
+    ),
+    (
+        " 度量   m               PSS / RSS / 虚拟 / 独占 / 共享 / Swap",
+        KeyCode::Char('m'),
+    ),
+    (
+        " 分组   g               类别 / 文件 / 映射",
+        KeyCode::Char('g'),
+    ),
+    (
+        " 排序   o               大小 / 地址（同时作用于列表）",
+        KeyCode::Char('o'),
+    ),
+    (" 面板   p               页图", KeyCode::Char('p')),
+    (" 面板   t               线程调用栈", KeyCode::Char('t')),
+    (" 面板   a               内存账务", KeyCode::Char('a')),
+    (
+        " 设置   s               定时刷新与界面设置",
+        KeyCode::Char('s'),
+    ),
+    (
+        " 内存   x               十六进制查看当前映射内容",
+        KeyCode::Char('x'),
+    ),
+    (
+        " 刷新   r rr s          立即刷新 / 定时刷新 / 设置",
+        KeyCode::Char('r'),
+    ),
+    (" 差值   d               切换变化标记", KeyCode::Char('d')),
+    (
+        " 进程   Esc q           根层 Esc 退出；主视图 q 退出",
+        KeyCode::Char('q'),
+    ),
+    (" 关闭   任意键          关闭本帮助", KeyCode::Esc),
 ];
 
 fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
@@ -1012,36 +1070,16 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, rect);
     buttons(
         frame,
-        Rect::new(rect.right().saturating_sub(8), rect.y, 8, 1),
+        Rect::new(rect.right().saturating_sub(12), rect.y, 12, 1),
         &[("关闭", Action::Key(KeyCode::Esc))],
         &app.mouse,
     );
 
-    let keys = [
-        KeyCode::Down,
-        KeyCode::Enter,
-        KeyCode::Char('v'),
-        KeyCode::Char('b'),
-        KeyCode::Char('f'),
-        KeyCode::Char('F'),
-        KeyCode::Char('/'),
-        KeyCode::Char('m'),
-        KeyCode::Char('g'),
-        KeyCode::Char('o'),
-        KeyCode::Char('p'),
-        KeyCode::Char('t'),
-        KeyCode::Char('a'),
-        KeyCode::Char('s'),
-        KeyCode::Char('x'),
-        KeyCode::Char('r'),
-        KeyCode::Char('q'),
-        KeyCode::Esc,
-    ];
     let offset = app.mouse.scrolls[3]
         .get()
-        .min(keys.len().saturating_sub(inner.height as usize) as u16);
+        .min(HELP_LINES.len().saturating_sub(inner.height as usize) as u16);
     app.mouse.scrolls[3].set(offset);
-    for (i, key) in keys
+    for (i, (_, key)) in HELP_LINES
         .iter()
         .skip(offset as usize)
         .enumerate()
@@ -1056,7 +1094,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .skip(offset as usize)
         .take(inner.height as usize)
-        .map(|line| {
+        .map(|(line, _)| {
             Line::from(Span::styled(
                 truncate_display(line, inner.width as usize),
                 Style::default(),
@@ -1088,7 +1126,7 @@ fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, rect);
     buttons(
         frame,
-        Rect::new(rect.right().saturating_sub(8), rect.y, 8, 1),
+        Rect::new(rect.right().saturating_sub(12), rect.y, 12, 1),
         &[("关闭", Action::Key(KeyCode::Esc))],
         &app.mouse,
     );
@@ -1164,7 +1202,7 @@ fn draw_accounting(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, rect);
     buttons(
         frame,
-        Rect::new(rect.right().saturating_sub(8), rect.y, 8, 1),
+        Rect::new(rect.right().saturating_sub(12), rect.y, 12, 1),
         &[("关闭", Action::Key(KeyCode::Esc))],
         &app.mouse,
     );
@@ -1222,6 +1260,53 @@ fn page_label(size: u64) -> String {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum ListUnit {
+    Auto,
+    B,
+    KiB,
+    MiB,
+    GiB,
+}
+
+impl ListUnit {
+    pub(crate) fn next(&mut self) {
+        *self = match self {
+            Self::Auto => Self::B,
+            Self::B => Self::KiB,
+            Self::KiB => Self::MiB,
+            Self::MiB => Self::GiB,
+            Self::GiB => Self::Auto,
+        };
+    }
+
+    pub(crate) fn button(self) -> &'static str {
+        match self {
+            Self::Auto => "单位:自动",
+            Self::B => "单位:B",
+            Self::KiB => "单位:KiB",
+            Self::MiB => "单位:MiB",
+            Self::GiB => "单位:GiB",
+        }
+    }
+
+    pub(crate) fn format(self, bytes: u64) -> String {
+        let shift = match self {
+            Self::Auto => return human_bytes(bytes),
+            Self::B => return bytes.to_string(),
+            Self::KiB => 10,
+            Self::MiB => 20,
+            Self::GiB => 30,
+        };
+        let n = bytes as f64 / (1u64 << shift) as f64;
+        if bytes > 0 && n < 0.01 {
+            "<0.01".into()
+        } else {
+            format!("{n:.2}")
+        }
+    }
+}
+
 pub fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
     let mut value = bytes as f64;
@@ -1275,7 +1360,7 @@ fn draw_memory(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, rect);
     buttons(
         frame,
-        Rect::new(rect.right().saturating_sub(8), rect.y, 8, 1),
+        Rect::new(rect.right().saturating_sub(12), rect.y, 12, 1),
         &[("关闭", Action::Key(KeyCode::Esc))],
         &app.mouse,
     );

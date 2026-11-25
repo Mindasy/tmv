@@ -16,13 +16,15 @@ def redraw(width):
     fcntl.ioctl(master,termios.TIOCSWINSZ,struct.pack('HHHH',40,width,0,0));drain(.4)
 try:
     drain(.4)
-    mouse(0,19,2);redraw(142)
+    toolbar = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', out.decode(errors='replace')).replace(' ', '')
+    assert '[列表3]' in toolbar and '[菜单?]' in toolbar, toolbar[:500]
+    mouse(0,25,2);redraw(142)
     assert '映射列表' in re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', out.decode(errors='replace'))
     mouse(0,10,5);mouse(65,10,5);mouse(32,10,7);mouse(0,10,7,'m')
-    mouse(0,68,2);redraw(140)
+    mouse(0,96,2);redraw(140)
     assert '定时刷新' in re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', out.decode(errors='replace'))
     mouse(2,60,20) # right click closes settings without exiting
-    mouse(0,60,2);redraw(142)
+    mouse(0,83,2);redraw(142)
     assert '基线' in re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', out.decode(errors='replace'))
     mouse(65,50,15);mouse(2,50,15)
     # Menu -> quit: final keyboard q is not needed for navigation above.

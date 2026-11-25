@@ -67,6 +67,12 @@ wall-clock
 time. A time before the first sample is an error. Without --at, the viewer
 opens
 the last sample containing layout data when available.
+For unresolved allocation frames, open and report use the recorded mapping and
+GNU build ID to locate a matching ELF at its recorded path or at
+SESSION/symbols/BUILD_ID. Supply an unstripped ELF there for offline replay.
+Default groups use the module and calling function, falling back to the
+original allocation stack.
+C++ overload signatures are preserved; individual frames retain offsets.
 .TP
 .BI "tmv report " "SESSION [OPTIONS]"
 Print statistics from a recorded sample, defaulting to the last sample. The
@@ -209,6 +215,13 @@ mismatched
 ELF build-id falls back to addresses; keep binaries/debug files at recorded
 paths.
 .SH "LAYOUT KEYS"
+Toolbar buttons show their keyboard shortcuts. In layout view, press 1, 2 or 3
+to select the treemap, address map or mapping list.
+In mapping and allocation lists, press uppercase U or click the unit control
+to cycle through automatic units, bytes, KiB, MiB and GiB.
+.TP
+.B ?
+Open the layout action menu. Click an action or press any key to dismiss.
 .TP
 .B arrows, hjkl
 Move the selection; in list view move row by row.
@@ -264,6 +277,9 @@ are highlighted; changing address clears the baseline. Reads do not stop the
 process and are not an atomic object snapshot. Historical memory bytes are not
 recorded and cannot be read from an offline session.
 .SH "SESSION KEYS"
+.TP
+.B ?
+Show shortcuts for the current session view. Esc closes help.
 .TP
 .B Tab
 Switch saved process layout / allocation attribution. Allocation selection
@@ -363,6 +379,10 @@ Raw trace filename prefix when launching LD_PRELOAD manually; output adds PID
 and
 \&.bin/.maps/.ids extensions. Existing event files are not overwritten.
 .SH FILES
+.TP
+.B /usr/share/bash-completion/completions/tmv
+Bash Tab completion installed by the RPM. The bash-completion loader discovers
+it automatically. It can also be sourced directly in an interactive Bash.
 .TP
 .I ~/.config/tmv/config.toml
 Interface preferences written on exit; override the location with

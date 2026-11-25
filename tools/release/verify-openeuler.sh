@@ -38,9 +38,25 @@ run_tests() {
     TMV_BIN="$1" TMV_LIBRARY="$2" bash tools/heaptrace/session-test.sh
 }
 if [[ "$mode" == all || "$mode" == rpm ]]; then
+    rpm -qpl "$dist/tmv-$version-1.oe2403.$arch.rpm" > "$work/rpm-files"
+    if grep -E '/examples(/|$)|/[^/]*\.tmvr(/|$)' "$work/rpm-files"; then
+        echo "Unexpected example in binary RPM" >&2
+        exit 1
+    fi
     rpm -ivh "$dist/tmv-$version-1.oe2403.$arch.rpm"
     installed=1
     rpm -V tmv
+    /usr/bin/tmv --help >/dev/null
+    bash -ec '
+        source /usr/share/bash-completion/completions/tmv
+        complete -p tmv >/dev/null
+        COMP_WORDS=(tmv rep); COMP_CWORD=1; _tmv_complete
+        [[ ${COMPREPLY[*]} == report ]]
+        COMP_WORDS=(tmv report --ana); COMP_CWORD=2; _tmv_complete
+        [[ ${COMPREPLY[*]} == --analysis ]]
+        COMP_WORDS=(tmv report --analysis lay); COMP_CWORD=3; _tmv_complete
+        [[ ${COMPREPLY[*]} == layout ]]
+    '
     check_auto /usr/bin/tmv "$work/rpm.tmvr"
     run_tests /usr/bin/tmv /usr/lib64/tmv/libtmvtrace.so
     rpm -e tmv

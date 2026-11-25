@@ -201,6 +201,7 @@ pub struct App {
     pub filter: Option<Filter>,
     /// 当前主视图。
     pub view: ViewMode,
+    pub(crate) list_unit: crate::ui::ListUnit,
     /// 列表视图中的选中行（对应过滤后的映射）。
     pub list_index: usize,
     /// 上一份快照，用于计算差值。
@@ -304,6 +305,7 @@ impl App {
             input_target: InputTarget::Address,
             filter: None,
             view: ViewMode::Treemap,
+            list_unit: crate::ui::ListUnit::Auto,
             list_index: 0,
             previous: None,
             diff: Diff::default(),
@@ -521,10 +523,6 @@ impl App {
                 }
                 self.handle_key(KeyEvent::from(key));
             }
-            Action::View(view) => {
-                self.view = view;
-                self.last_layout.clear();
-            }
             Action::Select(index) => {
                 self.selected = index;
                 self.mouse.scrolls[0].set(0);
@@ -654,6 +652,14 @@ impl App {
                 };
                 self.last_layout.clear();
             }
+            KeyCode::Char(c @ '1'..='3') => {
+                self.view = match c {
+                    '1' => ViewMode::Treemap,
+                    '2' => ViewMode::Blockmap,
+                    _ => ViewMode::List,
+                };
+                self.last_layout.clear();
+            }
             KeyCode::Char('v') => self.toggle_view(),
             KeyCode::Char('?') => self.show_help = true,
             KeyCode::Char('x') => self.open_memory(),
@@ -698,6 +704,7 @@ impl App {
                     self.cycle_thread(1);
                 }
             }
+            KeyCode::Char('U') if self.view == ViewMode::List => self.list_unit.next(),
             KeyCode::Char('u') => {
                 if self.show_threads {
                     self.load_stack();

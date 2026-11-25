@@ -1,5 +1,4 @@
 //! Rendered hit regions are the single source of truth for mouse targeting.
-use crate::app::ViewMode;
 use crossterm::event::KeyCode;
 use ratatui::{
     layout::Rect,
@@ -14,7 +13,6 @@ use std::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     Key(KeyCode),
-    View(ViewMode),
     Select(usize),
     List(usize),
     Address(u64),
@@ -42,16 +40,49 @@ impl MouseState {
             .map(|(_, a)| a.clone())
     }
 }
+fn button_text(label: &str, action: &Action) -> String {
+    let key = match action {
+        Action::Key(KeyCode::Char(' ')) => "Space".into(),
+        Action::Key(KeyCode::Char(c)) => c.to_string(),
+        Action::Key(KeyCode::Backspace) => "Backspace".into(),
+        Action::Key(KeyCode::Esc) => "Esc".into(),
+        Action::Key(KeyCode::Enter) => "Enter".into(),
+        Action::Key(KeyCode::Tab) => "Tab".into(),
+        _ => return format!("[{label}] "),
+    };
+    format!("[{label} {key}] ")
+}
+
+pub(crate) fn button_rows(width: u16, items: &[(&str, Action)]) -> u16 {
+    use unicode_width::UnicodeWidthStr;
+    let mut used = 0;
+    let mut rows = 1;
+    for (label, action) in items {
+        let w = button_text(label, action).width() as u16;
+        if used > 0 && used + w > width {
+            rows += 1;
+            used = 0;
+        }
+        used += w;
+    }
+    rows
+}
+
 pub fn buttons(frame: &mut Frame, area: Rect, items: &[(&str, Action)], state: &MouseState) {
     use unicode_width::UnicodeWidthStr;
     let mut x = area.x;
+    let mut y = area.y;
     for (label, action) in items {
-        let text = format!("[{label}] ");
+        let text = button_text(label, action);
         let width = text.width() as u16;
-        if x.saturating_add(width) > area.right() {
+        if x != area.x && x.saturating_add(width) > area.right() {
+            x = area.x;
+            y += 1;
+        }
+        if y >= area.bottom() || width > area.width {
             break;
         }
-        let rect = Rect::new(x, area.y, width, 1);
+        let rect = Rect::new(x, y, width, 1);
         frame.render_widget(
             Paragraph::new(text).style(Style::default().fg(Color::Cyan)),
             rect,

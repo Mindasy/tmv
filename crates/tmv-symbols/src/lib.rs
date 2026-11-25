@@ -15,6 +15,7 @@ use object::{Object, ObjectSymbol};
 use tmv_core::ProcessSnapshot;
 
 pub mod cfi;
+pub mod replay;
 
 pub use cfi::{FrameRules, SavedRule};
 
@@ -351,7 +352,12 @@ impl ModuleData {
             });
         }
 
-        symbols.sort_by(|a, b| a.start.cmp(&b.start).then(a.end.cmp(&b.end)));
+        symbols.sort_by(|a, b| {
+            a.start
+                .cmp(&b.start)
+                .then(a.name.cmp(&b.name))
+                .then(b.end.cmp(&a.end))
+        });
         symbols.dedup_by(|a, b| a.start == b.start && a.name == b.name);
 
         Self {
@@ -495,11 +501,13 @@ fn short_name(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
+/// Accept both linker names from older rule files and displayed signatures.
+pub fn function_matches(symbol: &str, rule: &str) -> bool {
+    symbol == rule || (rule.starts_with("_Z") && symbol == demangle(rule))
+}
+
 fn demangle(name: &str) -> String {
-    match rustc_demangle::try_demangle(name) {
-        Ok(value) => format!("{value:#}"),
-        Err(_) => name.to_string(),
-    }
+    addr2line::demangle_auto(name.into(), None).into_owned()
 }
 
 fn load_jit_map(pid: i32) -> Vec<JitSymbol> {

@@ -132,10 +132,6 @@ jobs:
             cmp "$dir/SHA256SUMS" "$dir/ACCEPTED-SHA256SUMS"
             (cd "$dir"; sha256sum -c SHA256SUMS)
             cp "$dir"/*."$arch".rpm "$dir"/tmv-*-openEuler-*.tar.gz release/
-            cp "$dir/CONTAINER-IMAGE.txt" "release/CONTAINER-IMAGE-$arch.txt"
-            cp "$dir/BUILD-INFO.txt" "release/BUILD-INFO-$arch.txt"
-            cp "$dir/ACCEPTANCE.txt" "release/ACCEPTANCE-$arch.txt"
-            cp "$dir/acceptance.log" "release/acceptance-$arch.log"
           done
           cp artifacts/openeuler-24.03-aarch64/*.src.rpm release/
           cp artifacts/openeuler-24.03-aarch64/tmv-*-vendor.tar.gz release/

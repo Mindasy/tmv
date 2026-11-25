@@ -13,13 +13,13 @@ use tmv_symbols::SymbolEngine;
 
 #[derive(Debug, clap::Args)]
 pub struct HeapArgs {
-    /// Read a Linux/glibc LD_PRELOAD allocation trace (requested bytes, NOT RSS)
+    /// 读取 glibc 分配事件，统计仍存活的申请字节
     #[arg(long, value_name="FILE", conflicts_with_all=["demo","replay","baseline","save_baseline","metric","lookup","read","stack"])]
     pub heap_trace: Option<PathBuf>,
-    /// Captured /proc/PID/maps; defaults to TRACE with .maps extension
+    /// 录制的 /proc/PID/maps 文件，默认将事件文件扩展名替换为 .maps
     #[arg(long, requires = "heap_trace")]
     heap_maps: Option<PathBuf>,
-    /// JSON array of build-id-bound allocation-site naming rules
+    /// 基于 Build ID 和调用函数的分配标定规则（JSON 数组）
     #[arg(long, requires = "heap_trace")]
     heap_rules: Option<PathBuf>,
 }
@@ -170,7 +170,7 @@ pub fn run(args: &super::Args) -> Result<()> {
                 .iter()
                 .filter(|r| {
                     id.as_deref() == Some(r.build_id.as_str())
-                        && symbol == Some(r.function.as_str())
+                        && symbol.is_some_and(|s| tmv_symbols::function_matches(s, &r.function))
                         && r.return_offset.is_none_or(|o| Some(o) == offset)
                 })
                 .collect();
