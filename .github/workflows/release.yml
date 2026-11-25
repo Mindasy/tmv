@@ -29,20 +29,55 @@ jobs:
             python3 tools/release/set-version.py "$GITHUB_REF_NAME"
           fi
           test "$(uname -m)" = '${{ matrix.arch }}'
-      - name: Build and test in openEuler 24.03
+      - name: Restore DNF download cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tmv-dnf-cache
+          key: oe2403-dnf-${{ matrix.arch }}-${{ hashFiles('tmv.spec', 'tools/release/prepare-deps.sh') }}
+          restore-keys: |
+            oe2403-dnf-${{ matrix.arch }}-
+      - name: Pull and start openEuler container
+        timeout-minutes: 5
         shell: bash
         run: |
+          mkdir -p "$RUNNER_TEMP/tmv-dnf-cache" "dist/${{ matrix.arch }}"
           docker pull openeuler/openeuler:24.03-lts
-          docker run --rm --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
-            -v "$PWD:/src" -w /src openeuler/openeuler:24.03-lts bash -lc '
-              set -euo pipefail
-              sed -i "s|http://repo.openeuler.org|https://repo.openeuler.org|g" /etc/yum.repos.d/*.repo
-              dnf --disablerepo="*" --enablerepo=OS,update install -y rust cargo gcc glibc-devel make rpm-build cpio python3 binutils git
-              bash tools/release/build-openeuler.sh
-              bash tools/release/verify-openeuler.sh 2>&1 | tee dist/$(uname -m)/acceptance.log
-            '
+          docker run -d --name tmv-build --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+            -v "$PWD:/src" -w /src \
+            -v "$RUNNER_TEMP/tmv-dnf-cache:/var/cache/dnf" \
+            openeuler/openeuler:24.03-lts sleep infinity
+          docker exec tmv-build bash -lc 'sed -i "s|http://repo.openeuler.org|https://repo.openeuler.org|g" /etc/yum.repos.d/*.repo'
           docker image inspect openeuler/openeuler:24.03-lts --format '{{json .RepoDigests}}' \
             > dist/${{ matrix.arch }}/CONTAINER-IMAGE.txt
+      - name: Download OS repository metadata
+        timeout-minutes: 4
+        run: docker exec tmv-build bash tools/release/prepare-deps.sh os
+      - name: Download update repository metadata
+        timeout-minutes: 8
+        run: docker exec tmv-build bash tools/release/prepare-deps.sh update
+      - name: Install build and test dependencies
+        timeout-minutes: 10
+        run: docker exec tmv-build bash tools/release/prepare-deps.sh install
+      - name: Build RPM and portable archive
+        timeout-minutes: 20
+        run: docker exec tmv-build bash tools/release/build-openeuler.sh
+      - name: Verify installed RPM and portable archive
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          set -o pipefail
+          docker exec tmv-build bash tools/release/verify-openeuler.sh 2>&1 | tee dist/${{ matrix.arch }}/acceptance.log
+      - name: Collect dependency logs and remove container
+        if: always()
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          if docker container inspect tmv-build >/dev/null 2>&1; then
+            mkdir -p "dist/${{ matrix.arch }}/dependency-logs"
+            docker cp tmv-build:/var/log/dnf.log "dist/${{ matrix.arch }}/dependency-logs/" || true
+            docker cp tmv-build:/var/log/dnf.librepo.log "dist/${{ matrix.arch }}/dependency-logs/" || true
+            docker rm -f tmv-build
+          fi
       - uses: actions/upload-artifact@v4
         if: always() && hashFiles(format('dist/{0}/**', matrix.arch)) != ''
         with:

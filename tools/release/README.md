@@ -59,3 +59,15 @@ RPM Source0/Source1 使用完整 tag 定位源码包。非法 tag 在打包前�
 参考：
 - [openEuler 官方容器镜像说明](https://hub.docker.com/r/openeuler/openeuler/)
 - [GitHub 托管 runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+
+## 下载阶段的进度与超时
+
+Actions 将镜像拉取、OS 元数据、update 元数据、依赖安装、构建和安装验收拆成独立步骤。
+OS 元数据输出完成不代表已开始编译：之后还有 update 元数据下载/解析和依赖安装。
+两个仓库均为必需，不会因下载失败而静默跳过 update。
+
+DNF 配置为 30 秒连接/低速检测窗口、10 KiB/s 最低速度、重试上限 2、最多 8 路下载；
+保留 RPM 缓存并关闭弱依赖安装。网络参数不限制本地元数据解析时间，所以另设步骤总超时：
+镜像 5 分钟、OS 元数据 4 分钟、update 元数据 8 分钟、安装 10 分钟。
+下载缓存按架构隔离，失败时尽力保存 dnf 日志到 Actions artifact 的 dependency-logs。
+修改工作流不会影响已经启动的运行；重跑旧 tag 也仍使用旧提交的工作流，需新提交触发。
