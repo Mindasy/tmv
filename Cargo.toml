@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 # openEuler 24.03 自带 rust 1.82，这里声明最低支持版本，
 # 避免误用更新的标准库 API（cargo / clippy / rust-analyzer 都会据此检查）。

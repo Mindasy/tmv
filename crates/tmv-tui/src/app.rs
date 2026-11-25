@@ -112,6 +112,7 @@ impl Filter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
     Treemap,
+    Blockmap,
     List,
 }
 
@@ -119,6 +120,7 @@ impl ViewMode {
     pub fn label(self) -> &'static str {
         match self {
             ViewMode::Treemap => "treemap",
+            ViewMode::Blockmap => "blockmap",
             ViewMode::List => "列表",
         }
     }
@@ -135,6 +137,9 @@ pub enum Dir {
 /// 内存查看器的状态，按 16 字节一行展示。
 #[derive(Debug, Clone)]
 pub struct MemoryView {
+    /// Interpret each row as little-endian u64/f64 values.
+    pub numeric: bool,
+    pub baseline: Option<Vec<u8>>,
     pub base: u64,
     pub bytes: Vec<u8>,
     /// 首行行号（每行 16 字节）。
@@ -155,6 +160,8 @@ impl MemoryView {
     fn failed(base: u64, error: String) -> Self {
         Self {
             base,
+            numeric: false,
+            baseline: None,
             bytes: Vec::new(),
             scroll: 0,
             error: Some(error),
@@ -163,6 +170,7 @@ impl MemoryView {
 }
 
 pub struct App {
+    pub mouse: crate::mouse::MouseState,
     pub snapshot: ProcessSnapshot,
     pub metric: Metric,
     pub group_by: GroupBy,
@@ -255,6 +263,8 @@ impl App {
         };
         let symbols = if demo {
             SymbolEngine::for_demo(&snapshot)
+        } else if pid.is_none() {
+            SymbolEngine::for_snapshot(&snapshot)
         } else {
             SymbolEngine::for_process(&snapshot)
         };
@@ -273,6 +283,7 @@ impl App {
             _ => (None, None, None, None),
         };
         let mut app = Self {
+            mouse: crate::mouse::MouseState::default(),
             snapshot,
             metric,
             group_by: GroupBy::Category,
@@ -413,6 +424,132 @@ impl App {
         }
     }
 
+    pub fn handle_mouse(&mut self, event: crossterm::event::MouseEvent) {
+        use crate::mouse::Action;
+        use crossterm::event::{MouseButton as Button, MouseEventKind as Kind};
+        if event.kind == Kind::Up(Button::Left) {
+            self.mouse.dragging = false;
+            return;
+        }
+        if event.kind == Kind::Down(Button::Right) {
+            if self.memory.is_some()
+                || self.show_settings
+                || self.show_help
+                || self.show_accounting
+                || self.input.is_some()
+            {
+                self.handle_key(KeyEvent::from(KeyCode::Esc));
+            } else {
+                self.back();
+            }
+            return;
+        }
+        let Some(action) = self.mouse.hit(event.column, event.row) else {
+            return;
+        };
+        if matches!(event.kind, Kind::ScrollUp | Kind::ScrollDown) {
+            let down = event.kind == Kind::ScrollDown;
+            if self.show_help {
+                let value = self.mouse.scrolls[3].get();
+                self.mouse.scrolls[3].set(if down {
+                    value.saturating_add(3)
+                } else {
+                    value.saturating_sub(3)
+                });
+            } else if self.memory.is_some() {
+                self.handle_key(KeyEvent::from(if down {
+                    KeyCode::Down
+                } else {
+                    KeyCode::Up
+                }));
+            } else if let Action::Scroll(id) = action {
+                let value = self.mouse.scrolls[id].get();
+                self.mouse.scrolls[id].set(if down {
+                    value.saturating_add(3)
+                } else {
+                    value.saturating_sub(3)
+                });
+            } else if self.show_settings {
+                self.handle_key(KeyEvent::from(if down {
+                    KeyCode::Down
+                } else {
+                    KeyCode::Up
+                }));
+            } else if self.view == ViewMode::List {
+                self.move_list(if down { 1 } else { -1 });
+            } else {
+                self.move_selection(if down { Dir::Down } else { Dir::Up });
+            }
+            return;
+        }
+        let dragging = event.kind == Kind::Drag(Button::Left) && self.mouse.dragging;
+        if event.kind != Kind::Down(Button::Left) && !dragging {
+            return;
+        }
+        if dragging
+            && !matches!(
+                action,
+                Action::Select(_) | Action::List(_) | Action::Address(_)
+            )
+        {
+            return;
+        }
+        let now = Instant::now();
+        let double = !dragging
+            && self
+                .mouse
+                .last
+                .as_ref()
+                .is_some_and(|(when, previous, focus)| {
+                    *previous == action
+                        && *focus == self.focus
+                        && now.duration_since(*when) < Duration::from_millis(400)
+                });
+        self.mouse.dragging = true;
+        self.mouse.last = if dragging || double {
+            None
+        } else {
+            Some((now, action.clone(), self.focus.clone()))
+        };
+        match action {
+            Action::Key(key) => {
+                if self.show_help {
+                    self.show_help = false;
+                    if key == KeyCode::Esc {
+                        return;
+                    }
+                }
+                self.handle_key(KeyEvent::from(key));
+            }
+            Action::View(view) => {
+                self.view = view;
+                self.last_layout.clear();
+            }
+            Action::Select(index) => {
+                self.selected = index;
+                self.mouse.scrolls[0].set(0);
+                self.refresh_details();
+                if double {
+                    self.enter();
+                }
+            }
+            Action::List(index) => {
+                self.list_index = index;
+                self.move_list(0);
+                if double {
+                    self.toggle_view();
+                }
+            }
+            Action::Address(address) => self.jump_to_address(address),
+            Action::Page(address) => self.open_memory_at(address),
+            Action::Setting(index) => {
+                self.settings_index = index;
+                self.handle_key(KeyEvent::from(KeyCode::Enter));
+            }
+            Action::Scroll(_) => {}
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
@@ -508,6 +645,14 @@ impl App {
                     self.selected = self.children().len().saturating_sub(1);
                     self.refresh_details();
                 }
+            }
+            KeyCode::Char('b') => {
+                self.view = if self.view == ViewMode::Blockmap {
+                    ViewMode::Treemap
+                } else {
+                    ViewMode::Blockmap
+                };
+                self.last_layout.clear();
             }
             KeyCode::Char('v') => self.toggle_view(),
             KeyCode::Char('?') => self.show_help = true,
@@ -632,6 +777,17 @@ impl App {
             return;
         }
         let previous = self.selected;
+        if self.view == ViewMode::Blockmap {
+            let mut order: Vec<usize> = (0..count).collect();
+            order.sort_by_key(|i| self.children()[*i].start);
+            let position = order.iter().position(|i| *i == self.selected).unwrap_or(0);
+            self.selected = order[match dir {
+                Dir::Left | Dir::Up => position.saturating_sub(1),
+                Dir::Right | Dir::Down => (position + 1).min(count - 1),
+            }];
+            self.refresh_details();
+            return;
+        }
 
         if self.last_layout.len() != count {
             self.selected = match dir {
@@ -809,7 +965,7 @@ impl App {
     pub fn toggle_view(&mut self) {
         self.view = match self.view {
             ViewMode::Treemap => ViewMode::List,
-            ViewMode::List => ViewMode::Treemap,
+            ViewMode::List | ViewMode::Blockmap => ViewMode::Treemap,
         };
         self.last_layout.clear();
         if self.view == ViewMode::List {
@@ -1081,9 +1237,15 @@ impl App {
     /// 以当前选中项的起始地址打开内存查看器。
     pub fn open_memory(&mut self) {
         let base = self.selected_node().map(|node| node.start).unwrap_or(0);
+        self.open_memory_at(base);
+    }
+
+    pub fn open_memory_at(&mut self, base: u64) {
         self.memory = Some(match self.memory_source(base) {
             Ok(bytes) => MemoryView {
                 base,
+                numeric: false,
+                baseline: None,
                 bytes,
                 scroll: 0,
                 error: None,
@@ -1114,11 +1276,35 @@ impl App {
             self.memory = None;
             return;
         }
+        if let Some(view) = self.memory.as_ref() {
+            let next = match key.code {
+                KeyCode::Char('n') => view.base.checked_add(MEMORY_WINDOW as u64),
+                KeyCode::Char('N') => view.base.checked_sub(MEMORY_WINDOW as u64),
+                KeyCode::Char('r') => Some(view.base),
+                _ => None,
+            };
+            if let Some(base) = next {
+                let baseline = if base == view.base {
+                    view.baseline.clone()
+                } else {
+                    None
+                };
+                let numeric = view.numeric;
+                self.open_memory_at(base);
+                if let Some(view) = self.memory.as_mut() {
+                    view.baseline = baseline;
+                    view.numeric = numeric;
+                }
+                return;
+            }
+        }
         let Some(view) = self.memory.as_mut() else {
             return;
         };
         let last = view.line_count().saturating_sub(1);
         match key.code {
+            KeyCode::Char('i') => view.numeric = !view.numeric,
+            KeyCode::Char('c') => view.baseline = Some(view.bytes.clone()),
             KeyCode::Up | KeyCode::Char('k') => view.scroll = view.scroll.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => view.scroll = (view.scroll + 1).min(last),
             KeyCode::PageUp => view.scroll = view.scroll.saturating_sub(MemoryView::LINE),
@@ -1370,6 +1556,13 @@ impl App {
             }
             Err(err) => self.stack_error = Some(describe_io(&err)),
         }
+    }
+
+    pub fn set_session_snapshot(&mut self, snapshot: ProcessSnapshot) {
+        self.previous = Some(self.snapshot.clone());
+        self.snapshot = snapshot;
+        self.symbols = SymbolEngine::for_snapshot(&self.snapshot);
+        self.rebuild();
     }
 
     fn rebuild(&mut self) {
@@ -2072,5 +2265,26 @@ mod tests {
             "实际: {:?}",
             view.error
         );
+    }
+}
+
+#[cfg(test)]
+mod memory_extension_tests {
+    use super::*;
+    #[test]
+    fn memory_window_baseline_and_numeric_mode() {
+        let mut app = App::new(demo::snapshot(), None, true, false);
+        app.open_memory_at(4096);
+        let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        app.handle_key(key('c'));
+        app.handle_key(key('i'));
+        app.handle_key(key('r'));
+        assert!(app.memory.as_ref().unwrap().numeric);
+        assert!(app.memory.as_ref().unwrap().baseline.is_some());
+        app.handle_key(key('n'));
+        assert_eq!(app.memory.as_ref().unwrap().base, 4096 + 512);
+        assert!(app.memory.as_ref().unwrap().baseline.is_none());
+        app.handle_key(key('N'));
+        assert_eq!(app.memory.as_ref().unwrap().base, 4096);
     }
 }

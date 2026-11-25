@@ -1,3 +1,5 @@
+mod heap;
+mod session;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -22,10 +24,22 @@ const MAX_READ_LEN: usize = 64 * 1024;
 /// `--read` 每行展示的字节数，与 `xxd` 一致。
 const READ_LINE: usize = 16;
 
-/// 以 treemap 方式查看进程虚拟地址空间（主要面向 Linux arm64）。
+/// 查看 Linux 进程内存布局、分配归属与离线会话（aarch64 / x86_64）。
 #[derive(Debug, Parser)]
-#[command(name = "tmv", version, about)]
+#[command(
+    name = "tmv",
+    version,
+    about,
+    args_conflicts_with_subcommands = true,
+    after_help = "示例:\n  tmv 1234                       查看进程布局\n  tmv run --output app.tmvr -- ./app  启动并采集\n  tmv open app.tmvr --at 9        回放记录开始后第 9 秒\n  tmv report app.tmvr --at 9 --stacks  离线排名与分配栈\n\n交互支持鼠标点击、拖动和滚轮；时间曲线仅用于离线会话。更多说明: man tmv / tmv <COMMAND> --help"
+)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<session::Command>,
+
+    #[command(flatten)]
+    heap: heap::HeapArgs,
+
     /// 目标进程 PID
     pid: Option<i32>,
 
@@ -146,6 +160,12 @@ impl From<MetricArg> for Metric {
 fn main() -> Result<()> {
     restore_sigpipe();
     let args = Args::parse();
+    if let Some(command) = &args.command {
+        return session::dispatch(command);
+    }
+    if args.heap.heap_trace.is_some() {
+        return heap::run(&args);
+    }
     let privileged = is_privileged();
 
     let snapshot = match collect_snapshot(&args) {
@@ -236,7 +256,10 @@ fn main() -> Result<()> {
     if args.interval > 0 {
         app.set_interval(Some(Duration::from_secs(args.interval)));
     }
-    let result = run(&mut terminal, &mut app);
+    let result = crossterm::execute!(std::io::stdout(), event::EnableMouseCapture)
+        .map_err(anyhow::Error::from)
+        .and_then(|_| run(&mut terminal, &mut app));
+    let _ = crossterm::execute!(std::io::stdout(), event::DisableMouseCapture);
     ratatui::restore();
     if !args.no_config {
         // 退出时把界面偏好写回，下次启动沿用；写失败不影响退出码。
@@ -621,10 +644,10 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         if event::poll(app.poll_timeout())? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    app.handle_key(key);
-                }
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => app.handle_key(key),
+                Event::Mouse(mouse) => app.handle_mouse(mouse),
+                _ => {}
             }
         }
 

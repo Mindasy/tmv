@@ -1,10 +1,22 @@
-.TH TMV 1 "2026-11-05" "tmv 0.1.0" "User Commands"
+.TH TMV 1 "2026-11-25" "tmv 0.2.0" "User Commands"
 .SH NAME
-tmv \- treemap viewer for a process virtual address space
+tmv \- process memory layout, allocation attribution and offline replay
 .SH SYNOPSIS
 .B tmv
 [\fIPID\fR]
 [\fIOPTIONS\fR]
+.br
+.B tmv run
+[\fIOPTIONS\fR] \-\- \fIPROGRAM\fR [\fIARGS\fR...]
+.br
+.B tmv attach
+\fIPID\fR
+.br
+.B tmv open
+\fISESSION.tmvr\fR [\-\-at \fISECONDS\fR]
+.br
+.B tmv report
+\fISESSION.tmvr\fR [\fIOPTIONS\fR]
 .SH DESCRIPTION
 .B tmv
 reads the virtual memory map of a running Linux process from
@@ -19,12 +31,106 @@ Sampling is read-only and requires either the same user ID as the target or
 Without \fBsmaps\fR permissions the viewer falls back to virtual sizes.
 .PP
 The interface is a full-screen TUI; press \fB?\fR for the key reference and
-\fBq\fR to quit. Memory contents can be inspected with \fBx\fR, which reads from
+\fBq\fR to quit. Memory contents can be inspected with \fBx\fR, which reads
+from
 .IR /proc/\fIPID\fR/mem .
-.SH OPTIONS
+.PP
+The original layout viewer remains the default. The allocation viewer tracks
+outstanding requested bytes and allocation call stacks; these bytes are not
+RSS
+and must not be added to RSS. Business labels require build-id-bound naming
+rules,
+not automatic inference of C/C++ structure types.
+.SH COMMANDS
+.TP
+.BI "tmv attach " PID
+Open the original live layout viewer. Does not inject a collector or
+reconstruct
+past allocations. Equivalent to \fBtmv PID\fR.
+.TP
+.BI "tmv run " "[OPTIONS] -- PROGRAM [ARGS...]"
+Start a same-architecture dynamically linked Linux/glibc program with the
+bundled
+LD_PRELOAD collector. Record periodic layout and allocation snapshots. The
+default
+sampling interval is one second. Quitting the viewer leaves both the target
+and
+the recorder running; the recorder completes after the target exits normally.
+.TP
+.BI "tmv open " "SESSION [--at SECONDS]"
+Browse a .tmvr directory. Follow while recording; when finished, enable
+offline
+replay and the time chart. \fB--at\fR requires a finished session and selects
+the
+last sample at or before elapsed SECONDS since recording started, not
+wall-clock
+time. A time before the first sample is an error. Without --at, the viewer
+opens
+the last sample containing layout data when available.
+.TP
+.BI "tmv report " "SESSION [OPTIONS]"
+Print statistics from a recorded sample, defaulting to the last sample. The
+final
+sample may have no process layout after exit; select an earlier --at for
+layout.
+.SH "RUN OPTIONS"
+.TP
+.BI \-\-output " DIRECTORY"
+Create a new session directory; it must not exist. Default:
+tmv-TIMESTAMP.tmvr.
+.TP
+.BI \-\-library " FILE"
+Collector library. Search order: explicit option, TMV_TRACE_LIB, library
+beside the
+executable, /usr/lib64/tmv/libtmvtrace.so, development source directory.
+.TP
+.BI \-\-heap\-rules " FILE"
+JSON array of naming rules. Each rule requires label, build_id, function;
+optional
+return_offset is the decimal return-address offset within the function. Omit
+the
+offset to match allocations throughout the function. Conflicting rules fail.
+.TP
+.BI \-\-interval " SECONDS"
+Sample every 1 to 3600 seconds; default 1. This is distinct from the top-level
+live layout --interval, where 0 disables automatic refresh.
+.TP
+.B \-\-no\-ui
+Do not open a TUI. Preserve the target's standard input/output. Interactive
+run
+redirects target stdout/stderr to program.log; use --no-ui for interactive
+targets.
+.SH "REPORT OPTIONS"
+.TP
+.BI \-\-at " SECONDS"
+Select the nearest preceding recorded sample relative to recording start.
+.TP
+.BI \-\-analysis " allocation|layout"
+Default allocation: group outstanding requested bytes by label/call site.
+Layout: group the saved process mappings by category using RSS.
+.TP
+.BI \-\-top " N"
+Limit text rankings and appended stack groups; default 20.
+.TP
+.B \-\-json
+Output the entire selected frame, including layout and allocations with
+stacks;
+this takes precedence over text and SVG options, independently of --analysis.
+.TP
+.BI \-\-svg " FILE"
+Export a Treemap SVG for the selected analysis. Session report does not
+provide
+--svg-format; the legacy layout/trace export supports treemap and flame.
+.TP
+.B \-\-stacks
+Append allocation stacks to non-JSON output. Stack paths are grouped with byte
+and block counts. Old recordings without captured stacks cannot reconstruct
+them.
+.SH "LAYOUT AND RAW TRACE OPTIONS"
 .TP
 .B \fIPID\fR
-Target process ID. Required unless \fB\-\-demo\fR or \fB\-\-replay\fR is used.
+Target process ID. Optional for demo, snapshot replay, offline raw traces or
+subcommands.
 .TP
 .B \-\-demo
 Use synthetic data so the interface can be previewed without a Linux process.
@@ -88,7 +194,21 @@ Print usage information.
 .TP
 .BR \-V ", " \-\-version
 Print version information.
-.SH KEYS
+.TP
+.BI \-\-heap\-trace " FILE"
+Read a raw allocator .bin trace; default output is text rankings. With PID and
+--interval, refresh while the target runs. Without PID, process it offline.
+Use run/open for the interactive allocation TUI.
+.TP
+.BI \-\-heap\-maps " FILE"
+Override captured maps; default is TRACE with the .maps extension.
+.TP
+.BI \-\-heap\-rules " FILE"
+Apply build-id-bound business labels to raw trace statistics. Missing or
+mismatched
+ELF build-id falls back to addresses; keep binaries/debug files at recorded
+paths.
+.SH "LAYOUT KEYS"
 .TP
 .B arrows, hjkl
 Move the selection; in list view move row by row.
@@ -96,8 +216,11 @@ Move the selection; in list view move row by row.
 .BR Enter ", " Esc
 Descend into the selected block / go back one level.
 .TP
-.B v
-Toggle between treemap and a flat mapping list.
+.B v, b
+Toggle Treemap/list, or the basic address-ordered Blockmap. Each block
+interval
+is independently scaled with holes folded; it is not a uniformly scaled page
+map.
 .TP
 .B f
 Filter mappings by path, label or permissions (substring).
@@ -125,6 +248,120 @@ Refresh once; press twice quickly to toggle auto-refresh.
 .TP
 .B q
 Quit.
+.TP
+.B [, ], u
+In the live thread panel: previous thread, next thread, refresh unwind.
+.TP
+.B d
+Toggle changes relative to the previous snapshot/baseline.
+.SH "MEMORY WINDOW"
+Use x on a mapping or click a sampled page. Read 512 bytes at a time; arrows
+and
+PageUp/PageDown scroll, n/N read next/previous window, r rereads, i toggles
+little-endian u64/f64 interpretation, c saves a comparison baseline. Changed
+lines
+are highlighted; changing address clears the baseline. Reads do not stop the
+process and are not an atomic object snapshot. Historical memory bytes are not
+recorded and cannot be read from an offline session.
+.SH "SESSION KEYS"
+.TP
+.B Tab
+Switch saved process layout / allocation attribution. Allocation selection
+updates
+the right-hand stack panel (below the chart on narrow terminals).
+.TP
+.B Enter, Backspace, arrows, v, b
+Descend, return, select blocks, toggle list, toggle basic address Blockmap.
+.TP
+.B t, PageUp, PageDown
+In allocation view: expand stack popup, scroll allocation stacks. Realloc
+preserves
+original allocation stack and separately records its latest successful resize.
+.TP
+.B [, ], End, Space
+Previous/next sample, latest sample/resume following, pause/resume following
+or
+offline playback. These keys refer to samples, not threads, in session mode.
+.TP
+.B T, M, P
+Offline only: enter elapsed seconds (such as 9.5), switch tracked
+allocation/RSS
+curve, jump to the sampled peak of the selected curve. The input shows the
+current
+time and valid range. Live sessions have no time curve; reopen after recording
+ends.
+.SH MOUSE
+Left click selects, left drag sweeps selections, double click descends into a
+group,
+right click returns or closes a popup. Toolbar/menu/settings buttons are
+clickable.
+The wheel scrolls lists, details, stacks, accounting and memory contents. The
+live
+thread panel offers previous/next/refresh buttons; memory offers window,
+numeric
+and baseline buttons. Click or drag the address bar to navigate mappings.
+.PP
+In offline sessions, click or drag the time curve left/right to select the
+nearest
+preceding sample. Selection synchronizes layout, allocation blocks and stacks.
+Dragging beyond the endpoints clamps to the first/last sample. Time curves
+remain
+offline-only. Terminal text selection may require the terminal's Shift
+modifier.
+.SH "RECORDING AND LIMITATIONS"
+A .tmvr session is a directory with manifest.json, sampled frames/, raw trace,
+module metadata, collector.log and (for interactive run) program.log. Copy the
+entire directory. Samples capture layout and allocations sequentially, not
+atomically.
+Raw events currently have no timestamps; replay is sampled, not event-exact.
+.PP
+Curves hold the previous sample between measurements. Dense time buckets
+preserve
+sampled maxima; missing RSS is a gap, not zero. Short-lived peaks between
+samples
+are not represented. Cache in the bundled demo is freed around 12 seconds;
+inspect
+--at 9 to see Cache 32 MiB and Session.buffer 24 MiB together.
+.PP
+Allocator hooks cover malloc/calloc/realloc/free and supported aligned
+allocators.
+They do not yet attribute mmap/madvise events; use layout/RSS for mappings.
+Static executables, allocator-internal/custom pool operations and
+secure-execution
+programs are not generally covered by LD_PRELOAD. Fork children do not append
+to
+the parent's trace. Module unload/address reuse is not reliably attributable.
+.PP
+Collection serializes writes and captures stacks, and may substantially affect
+allocation-intensive programs. Sessions store all live allocations at each
+sample;
+there are no quotas or low-overhead sampling buffers. Use bounded diagnostic
+runs.
+Unknown frees and incomplete/error states must be considered when interpreting
+data.
+A complete recording does not imply all allocator interfaces were covered.
+.PP
+Layout provides VMA/category/file rankings, page residency/THP/shared/swap
+sampling,
+smaps_rollup accounting, KSM, cgroup v1/v2, NUMA and snapshot differences.
+Availability
+is subject to kernel support and permissions. ELF/DWARF and debug files
+resolve
+symbols; thread unwind uses CFI with frame-pointer fallback and briefly
+attaches.
+.SH ENVIRONMENT
+.TP
+.B TMV_TRACE_LIB
+Explicit collector library used by run unless --library was supplied.
+.TP
+.B TMV_STACK_DEPTH
+Allocator unwind depth, default 16, maximum 32; 0 disables captured stacks.
+Collector/internal frames may reduce the number of displayed business frames.
+.TP
+.B TMV_TRACE
+Raw trace filename prefix when launching LD_PRELOAD manually; output adds PID
+and
+\&.bin/.maps/.ids extensions. Existing event files are not overwritten.
 .SH FILES
 .TP
 .I ~/.config/tmv/config.toml
@@ -138,8 +375,18 @@ Address space and per-mapping accounting.
 Memory contents, used by \fBx\fR and \fB\-\-read\fR.
 .TP
 .I /proc/PID/pagemap
-Page residency, requires \fBCAP_SYS_ADMIN\fR.
+Page residency subject to ptrace access checks; PFN-based sharing/THP
+information
+requires appropriate privilege (typically CAP_SYS_ADMIN/root).
+.TP
+.I /usr/lib64/tmv/libtmvtrace.so
+Private collector installed by the openEuler RPM; never configured as a global
+preload.
 .SH "EXIT STATUS"
+The following codes describe explicit exits from top-level layout commands.
+Subcommand/raw-trace errors returned by main use status 1; argument parser
+failures
+use status 2.
 .TP
 .B 0
 Success.
@@ -177,6 +424,27 @@ Highlight growth and shrinkage against a saved baseline.
 .TP
 .B tmv \-\-demo
 Preview the interface on a non-Linux host.
+.TP
+.B tmv run \-\-output app.tmvr \-\-heap\-rules rules.json \-\- ./app
+Record a program with business naming rules.
+.TP
+.B tmv run \-\-no\-ui \-\-output app.tmvr \-\- ./app
+Record without taking over the terminal.
+.TP
+.B tmv open app.tmvr \-\-at 9
+Inspect the sample at or before nine elapsed seconds.
+.TP
+.B tmv report app.tmvr \-\-at 9 \-\-stacks
+Print allocation rankings and grouped call stacks.
+.TP
+.B tmv report app.tmvr \-\-at 9 \-\-analysis layout
+Print saved RSS layout rankings.
+.TP
+.B tmv report app.tmvr \-\-at 9 \-\-json
+Output the selected full sample as JSON.
+.TP
+.B tmv report app.tmvr \-\-at 9 \-\-svg heap.svg
+Export the selected allocation Treemap.
 .SH "SEE ALSO"
 .BR ps (1),
 .BR proc (5),

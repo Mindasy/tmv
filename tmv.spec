@@ -1,22 +1,11 @@
 %global debug_package %{nil}
 
-# 本 spec 用于自建 RPM（发行版仓库不收录，产物随 GitHub Release 发布）。
-#
-# 构建源码包（在仓库根目录执行）：
-#   cargo vendor vendor
-#   tar --transform 's,^,tmv-0.1.0/,' --exclude target --exclude .git \
-#       --exclude '._*' -czf tmv-0.1.0.tar.gz \
-#       Cargo.toml Cargo.lock README.md LICENSE clippy.toml tmv.spec tmv.1 crates
-#   tar -czf tmv-0.1.0-vendor.tar.gz vendor
-# 然后 rpmbuild -ba tmv.spec（两个 tar 包需在 ~/rpmbuild/SOURCES）。
-#
-# 目标发行版不提供 rust crate 的 -devel 包，因此依赖用 vendor 方式随包提供，
-# 由 Source1 解出，构建过程不联网。
+# Build with tools/release/build-openeuler.sh on openEuler 24.03.
 
 %global project_url https://github.com/Mindasy/tmv
 
 Name:           tmv
-Version:        0.1.0
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        Treemap viewer for a process virtual address space
 Group:          Applications/System
@@ -32,6 +21,8 @@ ExclusiveArch:  aarch64 x86_64
 BuildRequires:  cargo
 BuildRequires:  rust
 BuildRequires:  gcc
+BuildRequires:  make
+BuildRequires:  glibc-devel
 
 %description
 tmv 以 WizTree 风格的 treemap 展示 Linux 进程的虚拟地址空间：
@@ -59,9 +50,12 @@ EOF
 %build
 export CARGO_HOME="%{_builddir}/%{name}-%{version}/.cargo-home"
 cargo build --release --offline --locked --frozen
+make -C tools/heaptrace CFLAGS="%{optflags} -fno-omit-frame-pointer"
 
 %install
 install -Dpm0755 target/release/%{name} %{buildroot}%{_bindir}/%{name}
+install -Dpm0755 tools/heaptrace/libtmvtrace.so %{buildroot}%{_libdir}/tmv/libtmvtrace.so
+install -Dpm0644 tools/heaptrace/demo/memory_demo.c %{buildroot}%{_docdir}/tmv/examples/memory_demo.c
 install -Dpm0644 tmv.1 %{buildroot}%{_mandir}/man1/tmv.1
 # 不生成 debuginfo 包（见文件头 debug_package），这里显式剥离调试符号。
 %{__strip} --strip-unneeded %{buildroot}%{_bindir}/%{name}
@@ -72,10 +66,15 @@ cargo test --release --offline --locked --frozen
 
 %files
 %{_bindir}/%{name}
+%{_libdir}/tmv/
+%{_docdir}/tmv/examples/
 %{_mandir}/man1/tmv.1*
-%doc README.md
+%doc README.md RELEASE-NOTES.md
 %license LICENSE
 
 %changelog
+* Wed Nov 25 2026 tmv maintainers - 0.2.0-1
+- Bundle allocation collector, offline replay and mouse interaction
+
 * Wed Nov 04 2026 tmv maintainers - 0.1.0-1
 - Initial package for openEuler

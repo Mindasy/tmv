@@ -32,3 +32,11 @@ jobs:
 
       - name: 构建 release 产物
         run: cargo build --release --locked
+
+      - name: Linux glibc preload integration
+        run: |
+          cargo build --locked
+          sh tools/heaptrace/test.sh
+
+      - name: Session recording and offline replay
+        run: sh tools/heaptrace/session-test.sh

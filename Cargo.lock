@@ -740,13 +740,16 @@ dependencies = [
 
 [[package]]
 name = "tmv-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
  "crossterm",
  "libc",
+ "object",
  "ratatui",
+ "serde",
+ "serde_json",
  "tmv-core",
  "tmv-ptrace",
  "tmv-symbols",
@@ -755,7 +758,7 @@ dependencies = [
 
 [[package]]
 name = "tmv-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "serde",
@@ -764,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "tmv-ptrace"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "tmv-core",
@@ -773,7 +776,7 @@ dependencies = [
 
 [[package]]
 name = "tmv-symbols"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "addr2line",
  "gimli",
@@ -784,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "tmv-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossterm",
  "ratatui",

@@ -8,11 +8,27 @@
 - 两次采样之间谁在增长
 - 某个线程当前的调用栈
 
+## 快速选择入口
+
+| 需要分析什么 | 命令 | 统计口径 |
+| --- | --- | --- |
+| 当前进程哪些映射占用大 | `tmv PID` 或 `tmv attach PID` | 虚拟 / RSS / PSS 等 |
+| 哪类分配尚未释放、谁分配的 | `tmv run --output app.tmvr -- ./app` | 已追踪存活申请字节与分配栈 |
+| 已采集进程的某个时刻 | `tmv open app.tmvr --at 9` | 距记录开始 9 秒之前最近采样 |
+| 离线排名或自动化分析 | `tmv report app.tmvr --at 9 --stacks` | 业务标定 / 调用位置排名 |
+| 单份旧快照 | `tmv --replay snapshot.json` | 保存的布局，无时间轴 |
+| 不带目标进程预览 | `tmv --demo` | 合成数据 |
+
+分配字节与 RSS 不是同一口径，不能相加；malloc 类型不能自动推导为 C/C++ 结构体。
+需用 build-id、函数和可选返回偏移标定业务名称。详细限制和例子见后文。
+
 ## 功能特性
 
 ### 视图与导航
 
 - Treemap 主视图，矩形面积与所选度量成正比，按类别 / 文件 / 映射聚合
+- 基础 Blockmap 以地址排序展示区间；每行独立缩放，不是全地址统一比例页图
+- 单击选择、拖动扫选、双击下钻、右键返回；工具栏与菜单可点击
 - 三级结构：进程 → 组 → VMA，可逐层下钻
 - 度量切换：PSS / RSS / 虚拟大小 / 独占 / 共享 / Swap
 - 排序切换：按大小降序 / 按地址升序
@@ -33,6 +49,7 @@
 
 - `x` 以当前选中映射的起始地址打开十六进制视图：地址 + 16 字节 hex + ASCII，类似 gdb 的 `x/32x`
 - 一次读取 512 字节（32 行），`↑↓` 逐行、`PgUp/PgDn` 翻页、`Home/End` 跳首尾
+- `n/N` 读取后/前一个窗口，`r` 重读，`i` 显示小端 u64/f64，`c` 设置变化比较基线；鼠标按钮与滚轮可操作
 - 读取走 `/proc/<pid>/mem`，需要 ptrace 权限；未映射或权限不足时面板内直接显示原因
 - 回放与进程退出后不可用，面板会说明原因；`--demo` 用合成字节预览界面
 
@@ -113,7 +130,7 @@
 - `--demo` 合成数据，可在 macOS 上预览全部界面（非 Linux 不读取 `/proc`）
 - 界面偏好持久化到 `~/.config/tmv/config.toml`，退出自动写回，`--no-config` 可关闭
 - 布局对块数是线性的：10 万 VMA 建树约 28 ms，200×60 区域铺满约 1 ms（release）
-- Release 提供 aarch64 / x86_64 的 musl 静态二进制，解包即可在 openEuler 等发行版运行
+- openEuler 24.03 完整包包含主程序与 glibc 采集库；每种架构独立构建验收
 - `cargo test --workspace` 覆盖几何、解析、treemap 布局、diff、符号与 UI 渲染
 
 ## 界面布局
@@ -405,61 +422,49 @@ cargo fmt --all                        # 格式化
 cargo test --release -p tmv-tui -- --ignored --nocapture large_snapshot
 ```
 
-## 发布与分发（GitHub Releases）
+## 发布与分发（openEuler 24.03）
 
-发布走 GitHub：推送 `v*` tag 后，[release.yml](file:///Users/mindas/code/mviewer/.github/workflows/release.yml) 自动构建静态二进制并附到 Release。
+0.2.0 完整版包含主程序和采集库，分别构建 aarch64、x86_64 的 RPM 与免安装包。
+各架构必须通过自己的安装包验收；具体结果见包内/附件的 `ACCEPTANCE.txt` 与
+`BUILD-INFO.txt`。仿真测试标明 QEMU，不等同于原生性能测试。
 
 | 产物 | 用途 |
 | --- | --- |
-| `tmv-<tag>-aarch64-unknown-linux-musl.tar.gz` | aarch64 静态二进制，openEuler / 麒麟等直接可用 |
-| `tmv-<tag>-x86_64-unknown-linux-musl.tar.gz` | x86_64 静态二进制 |
-| `tmv-<version>.tar.gz` / `tmv-<version>-vendor.tar.gz` | RPM 用的源码包与 vendor 依赖包 |
-| `*.sha256` / `SHA256SUMS` | 校验文件 |
-
-二进制包内是 `tmv` 可执行文件 + `README.md` + `LICENSE`，解包即可运行，不依赖目标机 glibc 版本。
-
-### 发版步骤
+| `tmv-0.2.0-1.oe2403.<arch>.rpm` | 安装到 `/usr/bin/tmv` 和 `/usr/lib64/tmv/libtmvtrace.so` |
+| `tmv-0.2.0-openEuler-24.03-<arch>.tar.gz` | 解压运行；主程序旁附采集库与示例回放 |
+| `tmv-0.2.0.tar.gz` / `tmv-0.2.0-vendor.tar.gz` | 源码与完整离线 Rust 依赖 |
+| `tmv-0.2.0-1.oe2403.src.rpm` | 源码 RPM |
+| `SHA256SUMS` | 下载校验 |
 
 ```bash
-git tag -a v0.1.0 -m "tmv 0.1.0"
-git push origin v0.1.0
+sha256sum -c SHA256SUMS
+sudo dnf install ./tmv-0.2.0-1.oe2403.aarch64.rpm
+man tmv
+# x86_64 使用文件名带 x86_64 的包。
+
+# 或免安装：
+tar -xzf tmv-0.2.0-openEuler-24.03-aarch64.tar.gz
+cd tmv-0.2.0-openEuler-24.03-aarch64
+./tmv open examples/demo.tmvr --at 9
+./tmv run --output service.tmvr -- ./your-service
 ```
 
-workflow 会用 `cross` 构建两个 musl 目标，打包、计算 sha256，然后创建 Release 并自动生成 changelog。也可以在 Actions 页面手动 `workflow_dispatch`，产物名为 `tmv-dev-<target>.tar.gz`。
+无需系统全局配置 LD_PRELOAD；只给 `run` 启动的目标注入采集库。
+本专用包使用 openEuler 24.03 的 glibc 构建，不能当作任意发行版通用静态包。
 
-### 持续集成
-
-[ci.yml](file:///Users/mindas/code/mviewer/.github/workflows/ci.yml) 在 push / PR 时执行：
+### 构建、验收和发布
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo build --release --locked
+bash tools/release/build-openeuler.sh
+sudo bash tools/release/verify-openeuler.sh
+# 测试机已有 tmv 时，可用私有挂载层验证升级，不覆盖宿主安装：
+sudo bash tools/release/verify-isolated.sh
 ```
 
-### 可选：自建 RPM
-
-仓库根目录的 `tmv.spec` 用于自建 RPM（不进发行版仓库），`ExclusiveArch` 覆盖 `aarch64` 与 `x86_64`。目标发行版没有 rust crate 的 `-devel` 包，因此依赖随 `vendor` 包提供，构建过程不联网。
-
-```bash
-cargo vendor vendor
-
-tar --transform 's,^,tmv-0.1.0/,' \
-    --exclude target --exclude .git --exclude '._*' \
-    -czf tmv-0.1.0.tar.gz \
-    Cargo.toml Cargo.lock README.md LICENSE clippy.toml tmv.spec tmv.1 crates
-tar -czf tmv-0.1.0-vendor.tar.gz vendor
-
-cp tmv-0.1.0*.tar.gz ~/rpmbuild/SOURCES/
-rpmbuild -ba tmv.spec
-sudo dnf install -y ~/rpmbuild/RPMS/$(uname -m)/tmv-0.1.0-1.*.rpm
-```
-
-- spec 里 `Source0` / `Source1` 指向 GitHub Release 附件；本地构建时把上面两个包放进 `SOURCES/` 即可，不会联网
-- `%check` 会执行 `cargo test --release --offline --locked`，不想跑测试可加 `--nocheck`
-- 安装后会一并装好 `tmv.1`，可用 `man tmv` 查看完整手册
-- 不想用 RPM 时，直接用 Release 里的静态二进制即可
+依赖、离线构建、隔离测试和 runner 要求见 [打包说明](tools/release/README.md)。
+[release.yml](.github/workflows/release.yml) 在两个 openEuler 架构均通过验收后，
+才为匹配版本的 `v*` tag 自动发布 Release；手动触发仅生成构建产物。
+[ci.yml](.github/workflows/ci.yml) 执行格式、Clippy、单元测试与构建。
 
 ### 与 openEuler 24.03 的 Rust 版本兼容
 
@@ -476,3 +481,225 @@ openEuler 24.03 LTS 自带 `rust 1.82`，无法解析 `edition2024` 的依赖清
 
 `Cargo.lock` 已按此解析并提交。workspace 与各 crate 都声明了 `rust-version = "1.82"`，仓库根目录的 `clippy.toml` 也设了 `msrv = "1.82"`，因此 clippy 与 rust-analyzer 不会再建议 1.83 以后才稳定的标准库 API；构建环境低于该版本时 cargo 会直接报错。升级这些依赖前，请先在 openEuler 24.03 上跑一次 `cargo build --offline --locked`，确认没有 MSRV 冲突。
 
+
+## 按分配位置定位堆内存大户（LD_PRELOAD）
+
+新增的堆分析与原有 VMA/RSS 视图互补：原有视图回答哪些映射实际驻留较多，
+堆分析回答哪些分配调用位置保留了最多尚未释放的申请字节。
+这两种字节数不能相加，堆申请字节不是 RSS，也不包含 allocator 碎片及缓存。
+
+采集库当前支持 **64 位 Linux/glibc、从启动跟踪的动态链接程序**。
+完整版已附带采集库；源码使用方式如下。自行构建时 tmv 主程序也可使用 musl，采集库仍必须匹配目标 glibc 与架构。
+
+```bash
+make -C tools/heaptrace
+mkdir -m 700 /tmp/tmv-run
+TMV_TRACE=/tmp/tmv-run/service \
+  LD_PRELOAD="$PWD/tools/heaptrace/libtmvtrace.so" ./your-service
+```
+
+生成 `service.<PID>.bin`（事件）、`.maps`（地址映射）、`.ids`（加载模块 build-id）。
+文件名已存在时拒绝覆盖事件文件；每次诊断使用新目录。
+采集初始化前和采集库析构之后不在覆盖范围内。
+
+另一个终端查看实时排名，PID 必须与事件文件一致：
+
+```bash
+# 每 2 秒追加一次统计；Ctrl-C 停止查看，不停止业务程序
+./tmv <PID> --heap-trace /tmp/tmv-run/service.<PID>.bin --interval 2 --top 20
+
+# 进程退出后离线报告，保留对应 maps、ids 和原始二进制/调试符号
+./tmv --heap-trace /tmp/tmv-run/service.<PID>.bin --report --top 30
+
+# JSON 含原始调用地址、符号、源码位置、build-id、返回地址偏移、累计分配/释放及峰值
+./tmv --heap-trace /tmp/tmv-run/service.<PID>.bin --json > heap.json
+
+# 复用现有 treemap / flame SVG 渲染，可按标定分类下钻
+./tmv --heap-trace /tmp/tmv-run/service.<PID>.bin --svg heap.svg
+./tmv --heap-trace /tmp/tmv-run/service.<PID>.bin --svg heap-flame.svg --svg-format flame
+```
+
+`--interval` 也可与 JSON（每行一个报告）或 SVG（周期性重写）使用。
+上述低层 `--heap-trace` 入口默认输出排名，图形通过 SVG 提供。交互方块图和调用栈使用下文 `run/open` 会话入口。
+
+### 给分配调用位置标定业务名称
+
+从 `--json` 输出中取 `build_id`、函数名和 `return_offset`，写入 JSON 数组：
+
+```json
+[
+  {
+    "label": "Session.buffer",
+    "build_id": "替换为实际build-id",
+    "function": "session_create",
+    "return_offset": 88
+  }
+]
+```
+
+```bash
+./tmv --heap-trace /tmp/tmv-run/service.<PID>.bin --heap-rules rules.json --report
+```
+
+偏移是**返回地址相对函数起点的十进制字节数**，不是调用指令偏移。
+省略 `return_offset` 可以归类整个函数内的分配；冲突规则直接报错。
+未命中规则的分配仍按调用位置展示，避免大户被隐藏。
+符号解析前比较当前 ELF 与 `.ids` 捕获的 build-id；不匹配或无 build-id 时保留原始地址，
+不套用规则。独立调试文件沿用原有 `.gnu_debuglink` / build-id 查找机制。
+请保留二进制原路径（离线跨机器暂不支持路径重映射）。
+
+### 统计口径与当前边界
+
+- 面积、占比按已追踪的存活申请字节计算；分配块数不一定等于业务对象数。
+- `realloc` 成功后保留原分配的分类；失败保留原记录；处理 glibc `realloc(p,0)` 释放语义。
+- 采集覆盖 malloc/calloc/realloc/free、memalign/aligned_alloc/posix_memalign 的可插入调用。
+  静态链接、自定义池内分配、内部不可插入接口及绕过这些函数的分配不保证覆盖。
+- 默认采集分配调用栈（回溯缓冲深度 16，上限 32），统一 allocator 包装可以通过上层栈定位；
+  尾调用、内联、缺失展开信息可能导致帧缺失。业务类型归属仍需标定。
+- mmap/madvise 事件尚未接入堆采集；映射和驻留量继续使用原有 `tmv PID` / `--report` 分析。
+- `.maps` / `.ids` 在初始化与正常析构时采集；在线 PID 可更新映射，动态加载模块的 build-id
+  在结束时更新。中途加载又卸载的模块不能可靠离线归因；尤其是代码地址复用，目前没有模块加载代次记录，
+  不支持对此类地址作可靠标定。普通缺失符号以原始地址展示。
+- fork 子进程不记录到父进程日志；exec 后若保留环境变量则生成独立文件。
+- `unknown_frees` 表示没有对应分配记录的释放（例如初始化前分配、未覆盖接口），会明确显示。
+- 缺少结束记录时显示 `open-or-incomplete`，不能区分仍在运行与异常终止/磁盘写入失败。
+  序号、PID、重复存活地址或事件格式异常会报错，尾部半条事件等待后续读取。
+- 采集为诊断模式：全局锁串行化分配与记录以保证跨线程地址复用顺序，每条记录 64 字节，
+  持续写磁盘，可能显著影响分配密集型负载。先在测试环境、限定诊断时长使用；暂无低开销采样模式。
+- 信号处理函数中调用 allocator 本身不满足异步信号安全，不受本方案支持。
+
+Linux 端到端测试（并发分配、realloc、符号标定与 SVG）：
+
+```bash
+cargo build --locked
+sh tools/heaptrace/test.sh
+```
+
+## 会话采集与离线回放
+
+原有 `tmv PID` 和旧快照 `--replay` 不变，默认仍是进程布局 Treemap。
+新增入口：
+
+```bash
+# 自动设置 preload、创建会话并显示原有布局方块图
+./tmv run --library /path/libtmvtrace.so --output server.tmvr -- ./server
+
+# 无界面采集；程序仍使用当前标准输入输出
+./tmv run --no-ui --library /path/libtmvtrace.so --output server.tmvr -- ./server
+
+# 可选：复用上述 build-id 标定规则
+./tmv run --heap-rules rules.json --output named.tmvr -- ./server
+
+# 保留原有布局查看，不注入采集库
+./tmv attach 1234
+
+# 实时跟随记录，或打开已结束的会话
+./tmv open server.tmvr
+
+# 按秒选取此前最近的采样，不读取原进程
+./tmv report server.tmvr --at 9 --analysis allocation
+./tmv report server.tmvr --at 9 --analysis layout
+./tmv report server.tmvr --at 9 --json
+./tmv report server.tmvr --at 9 --svg heap.svg
+```
+
+采集库按 `--library`、`TMV_TRACE_LIB`、tmv 同目录、`/usr/lib64/tmv/`、源码构建目录顺序查找。
+输出会话目录必须不存在。交互启动时业务 stdout/stderr 保存到 `program.log`，
+采集器日志为 `collector.log`；需要交互输入的程序请用 `--no-ui`。
+交互界面退出不会停止采集器或目标程序，目标结束后采集器自动完成记录。
+
+会话界面：
+
+- `Tab`：原有进程布局 / 新增分配 Treemap；默认保持布局模式。
+- `[` / `]`：前一个 / 后一个采样点，自动暂停跟随。
+- `End`：最新采样，记录中恢复跟随。
+- `Space`：记录中暂停/恢复画面跟随；记录结束后按采样间隔播放。
+- 分配模式 `Enter` 下钻到具体分配块，`Backspace` 返回；方向键选择。
+- `v`：Treemap / 列表；`b`：基础地址区间视图。
+- 原有布局模式的过滤、度量、分组和详情操作继续保留。
+- 会话浏览采用记录数据，不对历史 PID 发起内存读取或线程 attach。
+
+基础 Blockmap 当前按地址顺序展示区间，每个区间独立缩放，空洞折叠；
+并非全地址空间统一比例图，尚未实现页级缩放和业务归属叠加。
+分配模式需要先下钻到具体调用位置，再查看地址区间。
+
+原有实时 `tmv PID` 的内存窗口增强：`x` 打开后，`n/N` 连续前后读取 512 字节，
+`r` 重读，`i` 切换小端 u64/f64 解释，`c` 保存当前窗口比较基线；
+随后 `r` 刷新时变化行显示黄色。翻到另一地址会清除比较基线。
+读取不暂停目标，不保证跨字段一致性；数值解释不等于识别对象类型。
+
+### 当前会话格式和阶段边界
+
+`.tmvr` 是目录，`manifest.json` 为版本/进程/状态信息，`frames/` 为原子替换写入的
+周期快照，同时保留 preload 原始日志及模块文件。快照记录布局与当次观察到的存活分配。
+布局读取和分配日志读取是顺序进行的，不是全进程原子快照。
+
+本批为**采样点重放**，不是任意事件时刻重放；原始分配日志尚无时间戳。
+`--at` 选择指定秒数之前最近的采样，并显示实际采样时间；早于首个采样会报错。
+正常退出后的最后一帧通常没有布局数据，界面默认打开最后一个有布局的采样，
+`End` 可以查看最终分配账本；布局报表应指定退出前的 `--at`。
+`complete` 仅指记录器读到了 preload 正常结束标记，不代表覆盖所有分配接口。
+
+仍待后续批次完成：独立缓冲采集与开销控制、日志配额、记录器异常状态恢复、
+逐事件时间戳/检查点、A/B 区间报告、界面标定、精确模块加载代次、
+真正的可缩放页级 Blockmap、历史内容保存、指针跟随与 DWARF 类型展开。
+本批记录器仍沿用同步 preload，且每次采样保存全部存活分配；适合有界测试诊断，
+不应作为无限时长、低开销的生产记录器使用。
+
+
+### 分配调用栈与时间曲线
+
+新采集的会话保存分配时调用栈及符号/源码位置，可离线查看；旧会话仍可打开，
+但不会凭空补出此前未采集的栈。`realloc` 保留原始分配栈，同时记录最近一次成功扩容/缩容的栈。
+同一业务分类有多种栈路径时，分别列出各路径的存活字节与块数，不以任意一条栈代表全部对象。
+
+```bash
+./tmv open server.tmvr --at 9
+./tmv report server.tmvr --at 9 --stacks
+```
+
+**仅离线回放**在底部增加时间曲线，主区域仍保留原有 Treemap。实时查看/实时采集界面不显示曲线，不启用 T/M/P 或曲线鼠标选时刻；结束后重新 `tmv open` 才进入此模式。`open --at` 仅接受已结束的会话：
+
+- `M`：切换“已追踪存活申请字节”和“进程 RSS”；分开口径，不相加。
+- 点击曲线或按住鼠标左右拖动：连续选择该时间之前最近的实际采样；上方视图与调用栈同步切换并停止跟随。拖出图的左右边缘时停在首末采样。
+- `T`：输入**距本次记录开始的秒数**，例如 `9.5`；提示当前值和有效范围，Enter 确认、Esc 取消。
+- `[` / `]`：逐个采样切换；`P`：跳到当前曲线指标的采样峰值。
+- `Tab` 切换到分配归因后，选中业务分类或具体分配块，**右侧自动显示分配调用栈**；方向键或鼠标点击方块切换，PgUp/PgDn 滚动右侧长栈，`t` 可展开。窄终端自动将栈放在图下方。
+- 栈弹窗用上下键、PgUp/PgDn 滚动，`t/Esc` 关闭。查看时暂停播放/跟随。
+- 原有 `tmv PID` 的线程当前栈操作不变；分配栈与线程当前栈是不同数据。
+
+曲线横轴按实际经过时间排列；采样之间阶梯保持前一个值，压缩到同一列时取列内峰值。
+黄色列表示选中时刻；未采集的 RSS 显示缺口（·），不当作 0。
+图中的峰值是**采样峰值**，不会包括采样间已分配又释放的瞬时高点。
+当前曲线在打开时读取各采样的统计，超大会话尚未提供专用趋势索引。
+
+preload 在取得日志互斥锁前展开调用栈，避免在该锁内进行符号解析/展开。
+可用 `TMV_STACK_DEPTH=0` 关闭栈，或设置为 1～32；默认 16 包含采集器自身展开帧，
+最终保留的业务帧数可能更少。调用栈会增加采集与日志开销，仍属于诊断模式。
+
+示例 Cache 在约 12 秒释放，因此末段没有 Cache 方块是正常的。
+打开第 9 秒或按 `P` 跳到存活采样峰值，可以同时看到 Cache 32 MiB 和 Session.buffer 24 MiB。
+
+### 统一鼠标操作（终端界面）
+
+原有 `tmv PID`、demo、旧快照和会话浏览均启用鼠标，键盘操作保留：
+
+- Treemap / Blockmap：点击选择，按住左键拖动扫选，双击聚合块下钻，右键返回上层。
+- 列表：点击行选择，拖动扫选，滚轮移动选择；原有映射列表双击返回对应方块视图。
+- 原有布局顶部增加可点击工具栏，包含视图、菜单、度量、分组、刷新、内存与设置。
+- “菜单”中的操作可点击；设置项点击切换/调整。弹窗提供关闭按钮，也可右键关闭。
+- 地址条：点击或按住拖动跳到对应映射；页图点击打开该采样页地址的内存窗口。
+- 详情、线程栈、账务、内存内容与分配栈支持滚轮；内存窗口有可点击的翻页、刷新、数值、基线按钮。
+- 会话底部增加可点击导航按钮；分配图支持点击、双击下钻、拖动扫选及右键返回，右侧栈滚轮浏览。
+- 离线曲线保留点击/拖动选时刻；实时界面仍不显示时间曲线。鼠标支持不会改变这一限制。
+- 窄终端工具栏可能显示不全，可使用“菜单”及滚轮访问原有布局操作。
+- 终端开启鼠标捕获后，复制文本通常需要按住终端支持的 Shift 修饰键。
+
+### openEuler 24.03 完整版发布（0.2.0）
+
+新版专用发行包同时包含 `tmv` 和 `libtmvtrace.so`，提供 aarch64 / x86_64
+的 RPM 与免安装 tar.gz；各架构只有通过安装包验收后才可发布。
+此前仅包含主程序的 musl 包不能单独提供完整采集功能。
+
+打包、测试环境和发布门禁见 [双架构发布说明](tools/release/README.md)。
+发布工作流使用 GitHub 双架构 runner + openEuler 24.03 容器，两个架构均通过才发布 Release。

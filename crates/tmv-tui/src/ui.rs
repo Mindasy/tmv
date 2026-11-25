@@ -11,10 +11,16 @@ use tmv_core::{Category, MemNode, PageState, PageSummary, SortOrder};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, InputTarget, MemoryView, ViewMode};
+use crate::mouse::{buttons, Action};
 use crate::treemap::squarify;
+use crossterm::event::KeyCode;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    draw_in(frame, app, area);
+}
+pub(crate) fn draw_in(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.mouse.hits.borrow_mut().clear();
     if area.width < 40 || area.height < 8 {
         frame.render_widget(Paragraph::new("终端尺寸过小，请放大窗口"), area);
         return;
@@ -28,7 +34,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         0
     };
     let chunks = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(2),
         Constraint::Min(5),
         Constraint::Length(bottom_height),
         Constraint::Length(3),
@@ -36,7 +42,28 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .split(area);
 
-    draw_header(frame, app, chunks[0]);
+    draw_header(
+        frame,
+        app,
+        Rect::new(chunks[0].x, chunks[0].y, chunks[0].width, 1),
+    );
+    buttons(
+        frame,
+        Rect::new(chunks[0].x, chunks[0].y + 1, chunks[0].width, 1),
+        &[
+            ("方块", Action::View(ViewMode::Treemap)),
+            ("地址图", Action::View(ViewMode::Blockmap)),
+            ("列表", Action::View(ViewMode::List)),
+            ("菜单", Action::Key(KeyCode::Char('?'))),
+            ("返回", Action::Key(KeyCode::Backspace)),
+            ("度量", Action::Key(KeyCode::Char('m'))),
+            ("分组", Action::Key(KeyCode::Char('g'))),
+            ("刷新", Action::Key(KeyCode::Char('r'))),
+            ("内存", Action::Key(KeyCode::Char('x'))),
+            ("设置", Action::Key(KeyCode::Char('s'))),
+        ],
+        &app.mouse,
+    );
 
     if chunks[1].width >= 72 {
         let main =
@@ -66,13 +93,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else {
         draw_pages(frame, app, chunks[2]);
     }
+    for (index, rect) in app.last_layout.iter().enumerate() {
+        app.mouse.add(*rect, Action::Select(index));
+    }
     draw_strip(frame, app, chunks[3]);
     draw_footer(frame, app, chunks[4]);
     if app.show_settings {
         draw_settings(frame, app, area);
     }
     if app.show_help {
-        draw_help(frame, area);
+        draw_help(frame, app, area);
     }
     if app.show_accounting {
         draw_accounting(frame, app, area);
@@ -194,7 +224,16 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_treemap(frame: &mut Frame, app: &App, area: Rect) -> Vec<Rect> {
     let focused = app.focused();
-    let title = format!(" {}  ({} 项) ", app.breadcrumb(), focused.children.len());
+    let title = format!(
+        " {}  ({} 项) {} ",
+        app.breadcrumb(),
+        focused.children.len(),
+        if app.view == ViewMode::Blockmap {
+            "地址顺序 · 空洞折叠 · 每区间独立缩放"
+        } else {
+            ""
+        }
+    );
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -209,6 +248,9 @@ fn draw_treemap(frame: &mut Frame, app: &App, area: Rect) -> Vec<Rect> {
         return Vec::new();
     }
 
+    if app.view == ViewMode::Blockmap {
+        return draw_address_blocks(frame, &focused.children, app.selected, inner);
+    }
     let weights: Vec<f64> = focused
         .children
         .iter()
@@ -222,7 +264,48 @@ fn draw_treemap(frame: &mut Frame, app: &App, area: Rect) -> Vec<Rect> {
     rects
 }
 
-fn draw_block(frame: &mut Frame, node: &MemNode, rect: Rect, selected: bool, delta: Option<i64>) {
+/// Address-ordered interval rows; each interval has its own scale. Gaps are folded.
+pub(crate) fn draw_address_blocks(
+    frame: &mut Frame,
+    nodes: &[MemNode],
+    selected: usize,
+    area: Rect,
+) -> Vec<Rect> {
+    let mut order: Vec<usize> = (0..nodes.len()).collect();
+    order.sort_by_key(|i| nodes[*i].start);
+    let visible = usize::from(area.height / 3).max(1);
+    let position = order.iter().position(|i| *i == selected).unwrap_or(0);
+    let offset = position / visible * visible;
+    let mut rects = vec![Rect::default(); nodes.len()];
+    for (row, index) in order.into_iter().skip(offset).take(visible).enumerate() {
+        let rect = Rect::new(
+            area.x,
+            area.y + (row * 3) as u16,
+            area.width,
+            3.min(area.height.saturating_sub((row * 3) as u16)),
+        );
+        let n = &nodes[index];
+        let mut node = MemNode {
+            bytes: n.bytes,
+            category: n.category,
+            start: n.start,
+            end: n.end,
+            ..MemNode::empty()
+        };
+        node.label = format!("0x{:x}..0x{:x} {}", n.start, n.end, n.label);
+        draw_block(frame, &node, rect, index == selected, None);
+        rects[index] = rect;
+    }
+    rects
+}
+
+pub(crate) fn draw_block(
+    frame: &mut Frame,
+    node: &MemNode,
+    rect: Rect,
+    selected: bool,
+    delta: Option<i64>,
+) {
     if rect.width == 0 || rect.height == 0 {
         return;
     }
@@ -332,6 +415,15 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect) {
         let selected = app.list_index.min(rows.len() - 1);
         let offset = selected.saturating_sub(capacity - 1);
         for (index, vma) in rows.iter().enumerate().skip(offset).take(capacity) {
+            app.mouse.add(
+                Rect::new(
+                    inner.x,
+                    inner.y + 1 + (index - offset) as u16,
+                    inner.width,
+                    1,
+                ),
+                Action::List(index),
+            );
             let stats = vma.stats.as_ref();
             let text = format!(
                 "{:<25} {:>8} {:>8} {:>8} {:>8} {:<5} {}",
@@ -493,7 +585,17 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
         lines.splice(0..0, block);
     }
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    let offset = app.mouse.scrolls[0]
+        .get()
+        .min(lines.len().saturating_sub(1) as u16);
+    app.mouse.scrolls[0].set(offset);
+    app.mouse.add(inner, Action::Scroll(0));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((offset, 0)),
+        inner,
+    );
 }
 
 const PAGE_ANON: Color = Color::Indexed(33);
@@ -552,6 +654,11 @@ fn draw_pages(frame: &mut Frame, app: &App, area: Rect) {
                     let state = scan.states[sample];
                     let x = inner.x + (index % inner.width as usize) as u16;
                     let y = inner.y + (index / inner.width as usize) as u16;
+                    let address = scan.start
+                        + (sample as u64)
+                            * scan.pages.div_ceil(scan.states.len() as u64)
+                            * scan.page_size;
+                    app.mouse.add(Rect::new(x, y, 1, 1), Action::Page(address));
                     frame.buffer_mut().set_string(
                         x,
                         y,
@@ -612,8 +719,20 @@ fn draw_stack(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(stack_title(app));
-    let inner = block.inner(area);
+    let mut inner = block.inner(area);
     frame.render_widget(block, area);
+    buttons(
+        frame,
+        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+        &[
+            ("上一线程", Action::Key(KeyCode::Char('['))),
+            ("下一线程", Action::Key(KeyCode::Char(']'))),
+            ("重新回溯", Action::Key(KeyCode::Char('u'))),
+            ("关闭", Action::Key(KeyCode::Char('t'))),
+        ],
+        &app.mouse,
+    );
+    inner.height = inner.height.saturating_sub(1);
 
     if let Some(err) = &app.stack_error {
         frame.render_widget(
@@ -626,8 +745,13 @@ fn draw_stack(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let mut lines = Vec::new();
-    for (index, (pc, resolved)) in app.stack_frames.iter().enumerate() {
-        if index >= inner.height as usize {
+    let offset = app.mouse.scrolls[1]
+        .get()
+        .min(app.stack_frames.len().saturating_sub(1) as u16);
+    app.mouse.scrolls[1].set(offset);
+    app.mouse.add(inner, Action::Scroll(1));
+    for (index, (pc, resolved)) in app.stack_frames.iter().enumerate().skip(offset as usize) {
+        if index - offset as usize >= inner.height as usize {
             break;
         }
         let mut text = format!("#{index} 0x{pc:012x}");
@@ -771,6 +895,10 @@ fn draw_strip(frame: &mut Frame, app: &App, area: Rect) {
             .clamp(prev, area.width);
         if x1 > prev {
             let rect = Rect::new(area.x + prev, area.y, x1 - prev, 1);
+            app.mouse.add(
+                Rect::new(rect.x, rect.y, rect.width, 2),
+                Action::Address(vma.start),
+            );
             frame.render_widget(
                 Block::default().style(Style::default().bg(category_color(vma.category()))),
                 rect,
@@ -841,24 +969,29 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// 帮助面板里的按键说明，按「分类 / 按键 / 说明」预排版，避免中英混排错位。
-const HELP_LINES: [&str; 14] = [
+const HELP_LINES: [&str; 18] = [
     " 移动   ←→↑↓ / hjkl    选择相邻块；列表视图逐行移动",
     " 导航   Enter / Esc     下钻 / 返回；列表视图切回 treemap",
     " 视图   v               treemap ↔ 映射列表",
+    " 地址图 b               地址区间视图（每区间独立缩放）",
     " 过滤   f               路径 / 标签 / 权限，Enter 应用",
     " 过滤   F               同一范围的正则过滤，Enter 应用",
     " 地址   /               解析十六进制地址并跳转",
     " 度量   m               PSS / RSS / 虚拟 / 独占 / 共享 / Swap",
     " 分组   g               类别 / 文件 / 映射",
     " 排序   o               大小 / 地址（同时作用于列表）",
-    " 面板   p t a           页图 / 线程栈 / 账务",
+    " 面板   p               页图",
+    " 面板   t               线程调用栈",
+    " 面板   a               内存账务",
+    " 设置   s               定时刷新与界面设置",
     " 内存   x               十六进制查看当前映射内容",
     " 刷新   r rr s          立即刷新 / 定时刷新 / 设置",
     " 进程   Esc q           根层 Esc 退出；q 随时退出",
     " 关闭   任意键          关闭本帮助",
 ];
 
-fn draw_help(frame: &mut Frame, area: Rect) {
+fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
+    app.mouse.hits.borrow_mut().clear();
     let width = 62.min(area.width.saturating_sub(4));
     let height = (HELP_LINES.len() as u16 + 2).min(area.height.saturating_sub(2));
     if width < 40 || height < 6 {
@@ -877,9 +1010,51 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         .style(Style::default().bg(Color::Black));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
+    buttons(
+        frame,
+        Rect::new(rect.right().saturating_sub(8), rect.y, 8, 1),
+        &[("关闭", Action::Key(KeyCode::Esc))],
+        &app.mouse,
+    );
 
+    let keys = [
+        KeyCode::Down,
+        KeyCode::Enter,
+        KeyCode::Char('v'),
+        KeyCode::Char('b'),
+        KeyCode::Char('f'),
+        KeyCode::Char('F'),
+        KeyCode::Char('/'),
+        KeyCode::Char('m'),
+        KeyCode::Char('g'),
+        KeyCode::Char('o'),
+        KeyCode::Char('p'),
+        KeyCode::Char('t'),
+        KeyCode::Char('a'),
+        KeyCode::Char('s'),
+        KeyCode::Char('x'),
+        KeyCode::Char('r'),
+        KeyCode::Char('q'),
+        KeyCode::Esc,
+    ];
+    let offset = app.mouse.scrolls[3]
+        .get()
+        .min(keys.len().saturating_sub(inner.height as usize) as u16);
+    app.mouse.scrolls[3].set(offset);
+    for (i, key) in keys
+        .iter()
+        .skip(offset as usize)
+        .enumerate()
+        .take(inner.height as usize)
+    {
+        app.mouse.add(
+            Rect::new(inner.x, inner.y + i as u16, inner.width, 1),
+            Action::Key(*key),
+        );
+    }
     let lines: Vec<Line> = HELP_LINES
         .iter()
+        .skip(offset as usize)
         .take(inner.height as usize)
         .map(|line| {
             Line::from(Span::styled(
@@ -892,6 +1067,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
 }
 
 fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
+    app.mouse.hits.borrow_mut().clear();
     let width = 46.min(area.width.saturating_sub(4));
     let height = 9.min(area.height.saturating_sub(2));
     if width < 20 || height < 6 {
@@ -910,6 +1086,12 @@ fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().bg(Color::Black));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
+    buttons(
+        frame,
+        Rect::new(rect.right().saturating_sub(8), rect.y, 8, 1),
+        &[("关闭", Action::Key(KeyCode::Esc))],
+        &app.mouse,
+    );
     if inner.height < 3 || inner.width == 0 {
         return;
     }
@@ -924,6 +1106,10 @@ fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
         if index as u16 >= inner.height.saturating_sub(1) {
             break;
         }
+        app.mouse.add(
+            Rect::new(inner.x, inner.y + index as u16, inner.width, 1),
+            Action::Setting(index),
+        );
         let selected = index == app.settings_index;
         let marker = if selected { "▶ " } else { "  " };
         let value = if *label == "刷新间隔" {
@@ -947,13 +1133,13 @@ fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
 
     let hint = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
     frame.render_widget(
-        Paragraph::new("↑↓ 选择  ←→ 调整  Enter 切换  Esc 关闭")
-            .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new("点击调整 · 右键关闭 · ↑↓ ←→").style(Style::default().fg(Color::DarkGray)),
         hint,
     );
 }
 
 fn draw_accounting(frame: &mut Frame, app: &App, area: Rect) {
+    app.mouse.hits.borrow_mut().clear();
     let Some(accounting) = &app.accounting else {
         return;
     };
@@ -976,12 +1162,23 @@ fn draw_accounting(frame: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().bg(Color::Black));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
+    buttons(
+        frame,
+        Rect::new(rect.right().saturating_sub(8), rect.y, 8, 1),
+        &[("关闭", Action::Key(KeyCode::Esc))],
+        &app.mouse,
+    );
     if inner.height < 2 || inner.width == 0 {
         return;
     }
 
     let body_height = inner.height.saturating_sub(1);
-    for (index, line) in lines.iter().enumerate() {
+    app.mouse.add(inner, Action::Scroll(2));
+    let offset = app.mouse.scrolls[2]
+        .get()
+        .min(lines.len().saturating_sub(1) as u16);
+    app.mouse.scrolls[2].set(offset);
+    for (index, line) in lines.iter().skip(offset as usize).enumerate() {
         if index as u16 >= body_height {
             break;
         }
@@ -1048,6 +1245,7 @@ fn signed_bytes(delta: i64) -> String {
 
 /// 内存查看器：地址 + 十六进制 + ASCII，类似 gdb 的 `x` 命令。
 fn draw_memory(frame: &mut Frame, app: &App, area: Rect) {
+    app.mouse.hits.borrow_mut().clear();
     let Some(view) = &app.memory else {
         return;
     };
@@ -1068,13 +1266,19 @@ fn draw_memory(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(
-            " 内存 · pid {} · 0x{:x} · ↑↓ PgUp/PgDn，Esc 关闭 ",
+            " 内存 · pid {} · 0x{:x} · n/N 翻窗口 r 刷新 i 数值 c 比较基线 Esc 关闭 ",
             app.pid.unwrap_or_default(),
             view.base
         ))
         .style(Style::default().bg(Color::Black));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
+    buttons(
+        frame,
+        Rect::new(rect.right().saturating_sub(8), rect.y, 8, 1),
+        &[("关闭", Action::Key(KeyCode::Esc))],
+        &app.mouse,
+    );
 
     if let Some(error) = &view.error {
         let line = Line::from(Span::styled(
@@ -1085,7 +1289,21 @@ fn draw_memory(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let visible = inner.height as usize;
+    app.mouse.add(inner, Action::Key(KeyCode::Down));
+    buttons(
+        frame,
+        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+        &[
+            ("上页", Action::Key(KeyCode::Char('N'))),
+            ("下页", Action::Key(KeyCode::Char('n'))),
+            ("刷新", Action::Key(KeyCode::Char('r'))),
+            ("数值", Action::Key(KeyCode::Char('i'))),
+            ("基线", Action::Key(KeyCode::Char('c'))),
+            ("关闭", Action::Key(KeyCode::Esc)),
+        ],
+        &app.mouse,
+    );
+    let visible = inner.height.saturating_sub(1) as usize;
     let first = view.scroll.min(view.line_count().saturating_sub(1));
     let mut lines = Vec::with_capacity(visible);
     for (index, chunk) in view
@@ -1096,7 +1314,32 @@ fn draw_memory(frame: &mut Frame, app: &App, area: Rect) {
         .take(visible)
     {
         let address = view.base + (index * MemoryView::LINE) as u64;
-        lines.push(memory_line(address, chunk, inner.width as usize));
+        let changed = view.baseline.as_ref().is_some_and(|before| {
+            before.get(index * MemoryView::LINE..index * MemoryView::LINE + chunk.len())
+                != Some(chunk)
+        });
+        let line = if view.numeric {
+            let values = chunk
+                .chunks_exact(8)
+                .map(|bytes| {
+                    let word: [u8; 8] = bytes.try_into().unwrap();
+                    format!(
+                        "u64={} f64={:.5e}",
+                        u64::from_le_bytes(word),
+                        f64::from_le_bytes(word)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" | ");
+            Line::from(format!("{address:016x} LE {values}"))
+        } else {
+            memory_line(address, chunk, inner.width as usize)
+        };
+        lines.push(if changed {
+            line.style(Style::default().fg(Color::Yellow))
+        } else {
+            line
+        });
     }
     frame.render_widget(Paragraph::new(lines), inner);
 }

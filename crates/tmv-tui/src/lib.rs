@@ -2,9 +2,14 @@
 
 pub mod app;
 pub mod config;
+pub mod session;
 pub mod svg;
 pub mod treemap;
 pub mod ui;
 
 pub use app::App;
 pub use config::Config;
+
+mod timeline;
+
+pub mod mouse;

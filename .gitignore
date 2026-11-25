@@ -4,3 +4,10 @@ target
 /vendor
 /.cargo/config.toml
 /*.tar.gz
+
+/tools/heaptrace/libtmvtrace.so
+/tools/heaptrace/fixture
+/tools/heaptrace/demo/memory_demo
+/tools/heaptrace/demo/run.*/
+
+/dist/

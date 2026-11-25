@@ -115,6 +115,15 @@ impl SymbolEngine {
 
     /// 从进程快照构建模块索引，只记录元数据，ELF 在首次解析时懒加载。
     pub fn for_process(snapshot: &ProcessSnapshot) -> Self {
+        Self::from_snapshot(snapshot, true)
+    }
+
+    /// File symbols only: never read a historical PID's /proc memory or JIT map.
+    pub fn for_snapshot(snapshot: &ProcessSnapshot) -> Self {
+        Self::from_snapshot(snapshot, false)
+    }
+
+    fn from_snapshot(snapshot: &ProcessSnapshot, live: bool) -> Self {
         // 键：(路径, 加载偏差, build-id)；值：(地址区间列表, 区间并集大小)。
         type ModuleKey = (String, u64, String);
         type ModuleRanges = (Vec<(u64, u64)>, u64);
@@ -148,9 +157,17 @@ impl SymbolEngine {
 
         Self {
             modules,
-            jit: load_jit_map(snapshot.pid),
+            jit: if live {
+                load_jit_map(snapshot.pid)
+            } else {
+                Vec::new()
+            },
             jit_module: "[jit]".to_string(),
-            mem_modules: load_memory_modules(snapshot),
+            mem_modules: if live {
+                load_memory_modules(snapshot)
+            } else {
+                Vec::new()
+            },
             cache: HashMap::new(),
             cfi_cache: HashMap::new(),
             rules_cache: HashMap::new(),
